@@ -1,0 +1,34 @@
+{
+  "top_level": [
+    "name",
+    "networks",
+    "services",
+    "volumes"
+  ],
+  "service": [
+    "build",
+    "command",
+    "cpus",
+    "depends_on",
+    "entrypoint",
+    "environment",
+    "expose",
+    "healthcheck",
+    "hostname",
+    "image",
+    "init",
+    "labels",
+    "mem_limit",
+    "mem_reservation",
+    "networks",
+    "platform",
+    "ports",
+    "read_only",
+    "restart",
+    "stop_grace_period",
+    "tmpfs",
+    "user",
+    "volumes",
+    "working_dir"
+  ]
+}
