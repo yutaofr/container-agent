@@ -421,7 +421,7 @@ sequenceDiagram
   | `cgroup-parent` | any `cgroup_parent`, which places the container in a host cgroup |
   | `docker-sock` | a mount of the Docker socket, or of a directory that contains it (such as `/var/run` or `/run`) |
   | `host-mount` | a bind mount, or a local volume with `driver_opts` `device` plus `o: bind` (or `type: none`), whose source is outside the workspace |
-  | `volume-driver` | a top-level volume with any driver other than `local`, because its options are opaque to the Runner |
+  | `volume-driver` | a top-level volume with any driver other than `local`, because its options are opaque to the Runner; or a `local` volume whose `device` is not a bind path, a network share (`nfs`, `nfs4`, `cifs`), or `tmpfs`, such as `type: ext4` on `/dev/sda1` |
 
   Mount sources are checked after symlink resolution, and the check fails closed: a source that cannot be resolved, including a dangling symlink, is reported as `host-mount`. The finding shows the path as declared in the compose file.
 

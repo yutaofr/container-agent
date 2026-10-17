@@ -1422,14 +1422,14 @@ Added after Task 10 in response to automated security review of Tasks 2 and 4. E
    | `devices` | any `devices` entry |
    | `security-opt` | `seccomp` or `apparmor` unconfined, `label=disable` / `label:disable`, `no-new-privileges:false` |
    | `cgroup-parent` | any `cgroup_parent` |
-   | `volume-driver` | a top-level volume with a non-`local` driver |
+   | `volume-driver` | a top-level volume with a non-`local` driver, or a `local` volume whose `device` is not a bind path, `nfs`/`nfs4`/`cifs`, or `tmpfs` (for example `type: ext4` on `/dev/sda1`) |
 
    Top-level local volumes whose `driver_opts` make `device` a bind-mounted host path (`o` contains `bind` or `rbind`, or `type` is `none` or `bind`) get the `host-mount` and `docker-sock` checks. External volumes are not inspected. For findings on a top-level volume the `service` field holds the volume name, so approvals read `data:volume-driver`. Output order: per service in name order (`privileged`, `host-network`, `pid-host`, `ipc-host`, `userns-host`, `cap-add`, `devices`, `security-opt`, `cgroup-parent`, then volume mounts), then top-level volumes in name order.
 5. **Design doc** (`3982ae4`). Section 8 now has a table of every rule ID, the mount-source check flow, and the statement that sources are checked after symlink resolution and fail closed.
 
 **Verification:** `make runner-test` passes in the `golang:1.24` container. `cagent-runner validate` exits 1 on the risky sample and on a file using the new rules, and 0 on a clean file.
 
-**Known gaps, not covered:** `security_opt: systempaths=unconfined`, `pid` / `ipc` modes other than `host` (for example `container:<id>`), and the TOCTOU window between the lint check and `docker compose up`.
+**Known gaps, not covered:** `security_opt: systempaths=unconfined` and non-default `seccomp` / `label` values, `device_cgroup_rules`, `cgroupns_mode: host`, `uts: host`, a non-default `runtime`, `sysctls`, `pid` / `ipc` modes other than `host` (for example `container:<id>`), and the TOCTOU window between the lint check and `docker compose up`. Whether to move `security_opt` to an allowlist and add rules for the others is a design decision for section 8.
 
 ---
 

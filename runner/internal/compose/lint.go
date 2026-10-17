@@ -111,9 +111,12 @@ func riskySecurityOpts(opts []string) []string {
 	return risky
 }
 
-// lintVolume checks one top-level volume. Only the local driver is understood: with
-// bind-style options its device is a host path and gets the same checks as a bind mount;
-// any other driver is reported for approval, since its options are opaque to the Runner.
+// lintVolume checks one top-level volume. Only the local driver is understood. Its
+// "device" option is checked by filesystem type: a bind mount is a host path and gets the
+// same checks as a bind mount; network and tmpfs types name no host resource. Any other
+// type, such as ext4 on /dev/sda1, would mount a host device, so it is reported for
+// approval. A driver other than local is reported too, since its options are opaque to
+// the Runner.
 func lintVolume(add func(svc, rule, detail string), name string, v types.VolumeConfig, workingDir string, roots []string) {
 	if bool(v.External) {
 		return
@@ -123,14 +126,24 @@ func lintVolume(add func(svc, rule, detail string), name string, v types.VolumeC
 		return
 	}
 	device := v.DriverOpts["device"]
-	if device == "" || !isBindOpts(v.DriverOpts) {
+	if device == "" {
 		return
 	}
-	if !filepath.IsAbs(device) {
-		device = filepath.Join(workingDir, device)
+	if isBindOpts(v.DriverOpts) {
+		if !filepath.IsAbs(device) {
+			device = filepath.Join(workingDir, device)
+		}
+		checkHostPath(add, name, device, roots)
+		return
 	}
-	checkHostPath(add, name, device, roots)
+	if fsType := v.DriverOpts["type"]; !deviceFreeTypes[fsType] {
+		add(name, RuleVolumeDriver, fsType+":"+device)
+	}
 }
+
+// deviceFreeTypes are local-driver filesystem types whose "device" option does not refer
+// to a host device or path: remote shares, and tmpfs where it is only a label.
+var deviceFreeTypes = map[string]bool{"nfs": true, "nfs4": true, "cifs": true, "tmpfs": true}
 
 // isBindOpts reports whether local-driver options make "device" a bind-mounted host path.
 func isBindOpts(opts types.Options) bool {
