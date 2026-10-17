@@ -1,0 +1,21 @@
+name: platform
+
+on:
+  push:
+    paths: ["platform/**", "catalog/**", "runner/**", ".github/workflows/platform.yml"]
+  pull_request:
+    paths: ["platform/**", "catalog/**", "runner/**", ".github/workflows/platform.yml"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: runner/go.mod
+      - uses: astral-sh/setup-uv@v6
+      - name: Lint and unit tests
+        run: make platform-test
+      - name: Generated compose passes runner validate
+        run: make e2e
