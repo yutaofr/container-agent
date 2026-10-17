@@ -39,7 +39,7 @@ Constraints:
 | Artifact sources | Nexus / Artifactory and CI build artifacts. No prebuilt images exist, so the Runner builds them locally |
 | After delivery | Rule-based lightweight watch, cluster management, reusable recipes |
 | Architecture | Deterministic state machine with bounded LLM nodes |
-| Stack | Platform: Python (LangGraph + LiteLLM). Runner: Go (compose-go + Docker SDK) |
+| Stack | Platform: Python (LangGraph + LiteLLM). Runner: Go (compose-go + docker CLI) |
 | Model hosting | The POC may use a local Ollama; production routes everything through the LiteLLM gateway |
 
 **Why a state machine instead of a single autonomous agent.** Approval gates, the environment-only rule, budgets, and an LLM-free watch phase are hard rules. Hard rules belong in code, not in prompts. A state machine also confines small models to the narrow tasks they handle well.
@@ -105,6 +105,10 @@ flowchart LR
 - Runs only a fixed whitelist of tools. It exposes no arbitrary shell.
 - Gives each cluster an isolated directory, `~/.cagent/clusters/<name>/`, holding the compose file, generated Dockerfiles, and the tuning log.
 - Reads Nexus and CI credentials from the machine (`~/.m2/settings.xml`, `.npmrc`, CI tokens) and never uploads them.
+- Drives Docker through the `docker` CLI and its JSON output (`docker compose`, `docker inspect`, `docker logs`), with every argument built by the Runner and no shell in between. This avoids a large SDK dependency and API-version negotiation, and the Runner does exactly what a user could do by hand.
+- Names every compose project `cagent-<cluster>`. Before `down`, it checks that every container in the project carries `cagent.managed=true`, so it never touches a project it did not start.
+- Writes workspace files by opening the declared path with `O_NOFOLLOW` after the guard check, so a symlink planted between the check and the write is refused.
+- Runs L3 probes from a throwaway `busybox` container on the cluster network, because container IPs are not reachable from the host on every platform (Docker Desktop on macOS, for one).
 
 ### 3.3 POC vs. production
 
@@ -177,6 +181,18 @@ stateDiagram-v2
 | 9 | Hand over | Output endpoints, credentials, tuning log. Optionally save a recipe or write the fixed configuration back to the descriptor | Templates |
 | 10 | Watch | Rule-based monitoring; on anomalies, notify the user, who decides whether to re-enter self-healing | Runner rules |
 
+Verification runs level by level and stops at the first level that fails, so the report names the lowest broken layer:
+
+```mermaid
+flowchart LR
+  L1{"L1: every container<br/>running?"} -->|yes| L2{"L2: every healthcheck<br/>healthy?"}
+  L2 -->|yes| L3{"L3: every probe passes?<br/>HTTP status / TCP open"}
+  L3 -->|yes| L4{"L4: user checks<br/>(M6)"}
+  L1 -->|no| F["Report: reached none"]
+  L2 -->|no| F1["Report: reached L1"]
+  L3 -->|no| F2["Report: reached L2"]
+```
+
 Automatic fixes return to Prepare or Start, never to Approve — unless a patch falls outside the environment-only whitelist.
 
 ## 5. Self-Healing Loop
@@ -208,7 +224,7 @@ flowchart TD
 
 ### 5.1 Collect signals
 
-Each round the Runner collects container state, exit codes, restart counts, OOM kills, healthchecks, docker events, the last 200 log lines per service (pre-filtered for ERROR / Exception / FATAL), build logs, probe results, and resource usage. It packs them into a structured, redacted **diagnostic snapshot**. Raw logs are never uploaded in full.
+Each round the Runner collects, per service: container state, exit code, restart count, OOM kill, healthcheck status with its last output, and the last 200 log lines. It redacts every line, keeps up to 20 error lines (matching `error`, `exception`, `fatal`, `panic`, or `caused by`) and the last 5 lines, and fingerprints the error lines and any abnormal exit. The result is a structured, redacted **diagnostic snapshot**; raw logs never leave the machine. Build logs join the snapshot with M4; Docker events and resource usage are not collected yet.
 
 ### 5.2 Fingerprint errors
 

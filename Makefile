@@ -1,7 +1,11 @@
-.PHONY: runner-test runner-build platform-test e2e
+.PHONY: runner-test runner-integration runner-build platform-test e2e
 
 runner-test:
 	cd runner && test -z "$$(gofmt -l .)" && go vet ./... && go test ./...
+
+# Needs a Docker daemon; starts and removes throwaway busybox clusters.
+runner-integration:
+	cd runner && go vet -tags integration ./... && go test -tags integration -count=1 ./test/integration/
 
 runner-build:
 	cd runner && go build -o ../bin/cagent-runner ./cmd/cagent-runner
