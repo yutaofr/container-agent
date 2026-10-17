@@ -286,6 +286,26 @@ T0 rules in the POC (`platform/src/cagent/rules.py`). Each turns one problem int
 
 Every fix is a structured patch: a JSON Patch against the compose file, or a diff against a config file or Dockerfile. A whitelist validator checks each patch path. A patch that touches a source path stops the loop and produces a "source-code issue" diagnosis.
 
+The compose-patch gate (`within_environment` in `platform/src/cagent/patches.py`) is exact, and must stay strict: it is the only thing between a generated patch and a running cluster, and from M7 the T1/T2 model tiers will write patches, so its input stops being trusted code.
+
+- Operations: only `add`, `replace`, `remove`, and `test`. Anything else, including `move`, `copy`, an unknown or missing `op`, and any operation that carries a `from`, is refused, so no patch can read from a pointer the gate did not check.
+- Pointers: `path` is matched in full with `re.fullmatch`, so a trailing newline or an extra segment fails. Every pointer is checked, and a `path` that is missing or not a string fails.
+- Allowed service fields: `ports`, `mem_limit`, `cpus`, `environment`, `platform`, `depends_on`, and `healthcheck/start_period|interval|timeout|retries`. Not the whole `healthcheck` object and not `healthcheck/test`, which would change what the container runs. Images, builds, commands, volumes, and anything security-relevant need approval.
+- Denied environment variables: any name starting with `LD_` or `DYLD_`, because they make a process load chosen code. The check covers a key in the path (after RFC 6901 unescaping of `~0` and `~1`; an invalid escape fails), every key of a whole-environment mapping, and every entry of a list-form environment.
+
+```mermaid
+flowchart LR
+  P["patch operation"] --> O{"op in<br/>add, replace,<br/>remove, test?"}
+  O -->|no| X["refuse: needs approval"]
+  O -->|yes| F{"carries a from?"}
+  F -->|yes| X
+  F -->|no| M{"path fully matches<br/>an allowed field?"}
+  M -->|no| X
+  M -->|yes| E{"sets LD_* or DYLD_*<br/>in the environment?"}
+  E -->|yes| X
+  E -->|no| OK["apply"]
+```
+
 ### 5.5 Budgets and stop conditions
 
 - At most 3 attempts per error signature, 10 rounds overall, and 30 minutes; plus token and cost caps. Each cluster may override these.

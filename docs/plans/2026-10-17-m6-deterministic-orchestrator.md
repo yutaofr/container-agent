@@ -1885,6 +1885,32 @@ git commit -m "docs: list the T0 rules, fingerprint-based oscillation, and the p
 
 ---
 
+### Task 9: Harden the environment gate
+
+Added after Tasks 1–8, in response to an automated security review of the Task 5 commit (`016dae0`). Task 5's `within_environment` checked only `path`, with a `$`-anchored `re.match`.
+
+**Finding (MEDIUM, incomplete security gate), now resolved:**
+
+| Gap | Resolution |
+|---|---|
+| `move` and `copy` carry a `from` pointer the gate never checked | Only `add`, `replace`, `remove`, `test` are allowed, and any operation with a `from` is refused |
+| `$` accepts a trailing newline; `[^/]+` accepts a newline in a segment | Full match with `re.fullmatch`; service names limited to `[A-Za-z0-9._-]+` |
+| `healthcheck(/.*)?` allowed `healthcheck/test` and the whole object | Only `healthcheck/start_period`, `interval`, `timeout`, `retries` |
+| Any `environment` key was allowed, so `LD_PRELOAD` passed | Names starting `LD_` or `DYLD_` are refused as a path key (after RFC 6901 unescaping; invalid escapes fail), as keys of a whole-environment mapping, and in list-form entries |
+
+Exploitability was low when found: only the five in-repo rules produce patches. It matters from M7, when model tiers write patches that clear this same gate.
+
+**Files:**
+- Modify: `platform/src/cagent/patches.py` (the gate)
+- Modify: `platform/tests/test_rules.py` (allow cases, one test running every rule's fix through the gate so a later narrowing cannot silently disable a rule, and 21 rejection cases; 17 of them failed before the change)
+- Modify: `docs/plans/2026-10-17-container-agent-design.md` (section 5.4 lists the exact gate)
+
+**Commits:** `0acf94e` gate and tests. The docs commit follows it on the branch.
+
+**Follow-up for M7, not done here:** the gate checks *where* a patch writes, not *what* it writes into an allowed field. A model could still set `JAVA_OPTS=-javaagent:...` or publish a port on an arbitrary host port. M7 needs value checks for `environment`, `ports`, and `platform` before its tiers can emit patches automatically.
+
+---
+
 ## Milestone 6 done when
 
 - [ ] `make runner-test` passes in the golang container (thirteen packages `ok`), and `TestTCPPortFree` passes on macOS too
