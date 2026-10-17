@@ -1,0 +1,15 @@
+name: orders-poc
+purpose: Check that order-service stores orders in MySQL and publishes events to Kafka
+services:
+  - name: order-service
+    source: { kind: release, ref: "1.4.2" }
+    env: { SPRING_PROFILES_ACTIVE: dev }
+    publish: { http: 18080 }
+middleware:
+  - template: mysql
+    preset: tiny
+    publish: 13306
+  - template: kafka
+  - template: redis
+checks:
+  - Creating an order returns 201 and the event appears on the orders topic
