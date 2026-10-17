@@ -13,7 +13,8 @@ runner-build:
 platform-test:
 	cd platform && uv run ruff check . && uv run ruff format --check . && uv run pytest
 
-# Generated compose files must pass the real validate command, and the real Runner must
-# answer the hub and reconnect after a hub restart.
+# Generated compose files must pass the real validate command, the real Runner must
+# answer the hub and reconnect after a hub restart, and the orchestrator must heal a real
+# cluster with T0 rules alone.
 e2e: runner-build
-	cd platform && CAGENT_RUNNER=$(CURDIR)/bin/cagent-runner uv run pytest tests/test_cli.py tests/test_hub_e2e.py
+	cd platform && CAGENT_RUNNER=$(CURDIR)/bin/cagent-runner uv run pytest tests/test_cli.py tests/test_hub_e2e.py tests/test_orchestrator_e2e.py
