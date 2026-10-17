@@ -7,6 +7,7 @@ dependencies = [
     "packaging>=24",
     "pydantic>=2.9",
     "pyyaml>=6.0",
+    "websockets>=14",
 ]
 
 [project.scripts]
@@ -15,6 +16,7 @@ cagent-gen = "cagent.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=8.3",
+    "pytest-asyncio>=1.4.0",
     "ruff>=0.8",
 ]
 
@@ -27,6 +29,8 @@ packages = ["src/cagent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 100

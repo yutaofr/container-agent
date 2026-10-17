@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Fake is a Docker for tests. It answers each command from Responses, keyed by the
@@ -17,19 +18,21 @@ type Fake struct {
 
 // FakeResponse is the canned result of one command.
 type FakeResponse struct {
-	Out string
-	Err error
+	Out   string
+	Err   error
+	Delay time.Duration // how long the command takes to answer
 }
 
 func (f *Fake) answer(args []string) ([]byte, error) {
 	key := strings.Join(args, " ")
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, key)
 	r, ok := f.Responses[key]
+	f.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("fake docker: unexpected command %q", key)
 	}
+	time.Sleep(r.Delay)
 	return []byte(r.Out), r.Err
 }
 

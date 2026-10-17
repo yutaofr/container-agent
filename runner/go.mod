@@ -3,6 +3,7 @@ module github.com/yutaofr/container-agent/runner
 go 1.24.13
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/compose-spec/compose-go/v2 v2.16.1
 	go.yaml.in/yaml/v3 v3.0.5
 )

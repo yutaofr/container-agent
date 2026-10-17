@@ -22,6 +22,7 @@
 | Platform sends compose and probes as **content**; the Runner writes them into the cluster workspace | The platform never names a file on the user's machine. |
 | `build` over RPC: workdir only inside a `-workdir-root` given to `serve`; Maven settings only from `serve` | The platform can pick which approved directory to build, never an arbitrary one, and cannot redirect credentials. |
 | Params decoded with `DisallowUnknownFields` | A typo or an injected field fails loudly. |
+| `allow` approvals over RPC must name a rule listed with `serve -allow-rule` (repeatable, empty by default) | The platform relays the user's approvals, but a compromised platform or leaked token must not be able to approve `privileged` or `docker-sock` on its own. Added as Task 7 after an automated security review. |
 | Token from an environment variable (`-token-env`, default `CAGENT_TOKEN`); a 401/403 stops the Runner | Keeps the token out of `ps`; retrying a rejected token cannot help. |
 | Runner reads continuously; calls run one at a time on a worker goroutine | `websockets` pings every 20 s; `coder/websocket` answers pings only while reading. Handling a 5-minute build in the read loop would get the Runner dropped as dead. |
 | Hub registers a Runner only after `hello`; on reconnect it swaps the new connection in **before** closing the old | Both found by tests while planning: without the first, `wait_for_runner` returned before the tool list arrived; without the second, a call could be routed to the closing connection. |
@@ -1348,6 +1349,41 @@ sequenceDiagram
 git add docs/plans/2026-10-17-container-agent-design.md
 git commit -m "docs: describe the Runner protocol and POC authentication"
 ```
+
+---
+
+### Task 7: Local ceiling for RPC approvals
+
+Added after Tasks 1–6, in response to an automated security review: Task 2's `composeTool` passed the platform's `allow` list straight to `-allow`, so a compromised platform or a leaked token could approve `web:privileged` without anyone at the user's machine agreeing.
+
+**Behaviour**
+
+- `serve` takes a repeatable `-allow-rule RULE` flag. Each value is a lint rule ID as the Runner reports it (`privileged`, `docker-sock`, `field:sysctls`). The list is empty by default, so by default the platform cannot approve any exception.
+- For `validate` and `up`, every `allow` entry from RPC is trimmed (the subcommand trims too, so the check sees what it will run), then split at the **first** colon into service and rule. Rule IDs such as `field:sysctls` contain colons; services do not. `*:field:configs` therefore has the rule `field:configs`.
+- The call fails with JSON-RPC invalid params (`-32602`) when an entry contains a comma, has no colon, has an empty service or rule, or names a rule that is not in the list. Example: `allow "web:privileged": rule "privileged" is not in this Runner's -allow-rule list`.
+- The command-line `-allow` flag of `validate` and `up` is unchanged.
+
+```mermaid
+flowchart LR
+  A["RPC allow entry<br/>' web:privileged '"] --> T["trim"]
+  T --> S{"split at first colon:<br/>service and rule non-empty?"}
+  S -->|no| E["-32602 invalid params"]
+  S -->|yes| L{"rule in<br/>serve -allow-rule?"}
+  L -->|no| E
+  L -->|yes| OK["passed to -allow"]
+```
+
+**Files**
+
+- `runner/cmd/cagent-runner/serve.go`: `serveConfig.allowRules`, the `-allow-rule` flag, `checkApprovals`, and `composeTool` now using `cfg`.
+- `runner/cmd/cagent-runner/main.go`: usage line.
+- `runner/cmd/cagent-runner/serve_test.go`: refused by default; applied when listed (and no other rule opens); field and top-level field rules; malformed entries; whitespace normalised.
+- `platform/tests/test_hub_e2e.py`: the real Runner is started with `-allow-rule privileged`; an approved `web:privileged` passes and `web:docker-sock` is refused.
+- Design doc: sections 3.4 and 8.
+
+**Commits:** `bb67dcf` (code and tests); the documentation follows in the next commit.
+
+**Verified:** `make runner-test` in the golang container (13 packages `ok`); `make platform-test` (`46 passed, 2 skipped`); the end-to-end test on the host with the darwin/arm64 Runner (3 runs, `48 passed` for the whole suite), with no `cagent-runner serve` process and no `bin/` left behind.
 
 ---
 
