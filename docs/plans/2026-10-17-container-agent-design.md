@@ -326,6 +326,66 @@ flowchart LR
 - **Single-service rebuild**: after a code change in a working directory, replace just that service's container in one step.
 - **Unregistered projects**: the agent reads pom, gradle, package.json, go.mod, and any existing Dockerfile to draft a descriptor. Once the cluster works, the user can submit the draft to the project repository as a PR.
 
+### 6.3 Middleware templates and ClusterSpec
+
+Middleware templates live in `catalog/middleware/`. Each declares the capability it provides, its supported versions, one container port, the `connection` values a consumer's `bind` templates may use, a healthcheck, and resource presets:
+
+```yaml
+name: mysql
+kind: middleware
+provides: { capability: mysql }
+image: "mysql:{version}"
+versions: ["8.0", "8.4"]
+default_version: "8.4"
+port: 3306
+connection: { db: app, user: app, password: app }   # throwaway prototype credentials
+env:
+  MYSQL_DATABASE: "{{db}}"
+  MYSQL_USER: "{{user}}"
+  MYSQL_PASSWORD: "{{password}}"
+  MYSQL_ROOT_PASSWORD: root
+healthcheck:
+  cmd: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u{{user}} -p{{password}} --silent"]
+presets:
+  tiny: { mem_limit: 512m, cpus: 0.5 }
+  standard: { mem_limit: 1g, cpus: 1.0 }
+```
+
+A **ClusterSpec** is what the Clarify phase produces and the Generate phase consumes:
+
+```yaml
+name: orders-poc
+purpose: Check that order-service stores orders in MySQL and publishes events to Kafka
+services:
+  - name: order-service
+    source: { kind: release, ref: "1.4.2" }   # release | snapshot | ci | workdir
+    env: { SPRING_PROFILES_ACTIVE: dev }
+    publish: { http: 18080 }                   # port name → host port
+middleware:
+  - template: mysql
+    preset: tiny
+    publish: 13306
+  - template: kafka
+bindings: {}   # e.g. "order-service/mysql": mysql-b when two instances provide mysql
+checks:
+  - Creating an order returns 201 and the event appears on the orders topic
+```
+
+```mermaid
+flowchart LR
+  SPEC["ClusterSpec"] --> M["Match requires → provides<br/>check version specifiers"]
+  CAT["Catalog"] --> M
+  M --> R["Render bind templates<br/>host · port · connection"]
+  R --> C["compose.yaml"]
+  C --> V["cagent-runner validate"]
+  M -.->|"missing, ambiguous,<br/>or wrong version"| Q["Problems → Clarify questions"]
+```
+
+- Each `{{placeholder}}` in a consumer's `bind` is filled from the chosen provider: `host` (its compose service name), `port`, and its `connection` values.
+- Every `$` in a generated string is escaped as `$$`, so compose does not interpolate it.
+- App images are tagged `cagent/<service>:<source kind>-<ref>` (a hash for `workdir`); M4 builds them.
+- The generator collects every problem instead of stopping at the first, so the Clarify phase can ask about all gaps in one round.
+
 ## 7. Model Routing
 
 ```mermaid
@@ -438,6 +498,7 @@ flowchart TD
   W -->|yes| OK["Allowed"]
 ```
 
+- **Reviewed-field allow-list**: the deny-list above names known escape vectors; the allow-list closes the rest. `runner/internal/compose/allowed_fields.json` lists the top-level and service keys the generator emits or that cannot weaken isolation. `validate` checks the keys in effect after YAML anchors, `extends`, and `include` are applied, and reports every other key as `field:<key>`, approvable one key at a time (`web:field:sysctls`, or `*:field:configs` for a top-level key). A key that already triggered a specific rule above is not reported twice. Keys starting with `x-` are compose extensions and always allowed. The platform's tests read the same file, so the generator cannot emit a key `validate` would reject.
 - **Credentials and redaction**: credentials never leave the machine. The Runner redacts diagnostic snapshots (passwords, tokens, AK/SK, passwords inside JDBC URLs) before upload, so neither the platform nor any model sees raw logs.
 - **Audit**: the platform logs every tool call, patch, and approval, replayable per cluster.
 

@@ -1,0 +1,26 @@
+# Sample descriptor for tests. Real descriptors live in each project's .cagent/service.yaml.
+name: order-service
+kind: app
+stack: java-springboot
+sources:
+  release:  { nexus: "com.acme:order-service:{version}:jar" }
+  snapshot: { nexus: "com.acme:order-service:{version}-SNAPSHOT:jar" }
+  ci:       { jenkins: "order-service/main", artifact: "target/*.jar" }
+  workdir:  { build: "mvn -q package -DskipTests", output: "target/*.jar" }
+runtime:
+  ports: [{ name: http, container: 8080 }]
+  env:
+    required: [SPRING_PROFILES_ACTIVE]
+    defaults: { JAVA_OPTS: "-Xmx512m" }
+  healthcheck: { http: /actuator/health, expect: 200 }
+requires:
+  - capability: mysql
+    version: ">=8.0"
+    bind:
+      SPRING_DATASOURCE_URL: "jdbc:mysql://{{host}}:{{port}}/{{db}}"
+      SPRING_DATASOURCE_USERNAME: "{{user}}"
+      SPRING_DATASOURCE_PASSWORD: "{{password}}"
+  - capability: kafka
+    bind: { SPRING_KAFKA_BOOTSTRAP_SERVERS: "{{host}}:{{port}}" }
+probes:
+  - http: { path: /api/orders/ping, expect: 200 }

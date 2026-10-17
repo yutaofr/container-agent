@@ -1,5 +1,5 @@
 // Command cagent-runner executes whitelisted cluster operations on the user's machine.
-// Milestone 1 ships only the offline "validate" subcommand.
+// It currently ships only the offline "validate" subcommand.
 package main
 
 import (
@@ -65,14 +65,24 @@ func run(args []string, stdout, stderr io.Writer, free func(int) bool) int {
 		}
 	}
 
-	p, err := compose.Load(context.Background(), abs, *name)
+	ctx := context.Background()
+	p, err := compose.Load(ctx, abs, *name)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return exitError
 	}
+	fields, err := compose.LoadFields(ctx, abs, *name)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitError
+	}
+	// Specific rules run unfiltered so the field check knows which keys they already cover;
+	// approvals apply once, to the combined list.
+	specific := compose.Lint(p, []string{ws}, nil)
+	all := append(specific, compose.UnreviewedFields(fields, specific)...)
 	rep := Report{
 		Project:       p.Name,
-		Findings:      compose.Lint(p, []string{ws}, allow),
+		Findings:      compose.WithoutApproved(all, allow),
 		PortConflicts: compose.HostPortConflicts(p, free),
 	}
 	enc := json.NewEncoder(stdout)

@@ -69,3 +69,18 @@ func TestValidateInvalidFile(t *testing.T) {
 		t.Error("no error message on stderr")
 	}
 }
+
+func TestValidateReportsUnreviewedField(t *testing.T) {
+	path := writeFile(t, "services:\n  web: { image: nginx:1.27, uts: host }\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"validate", "-f", path}, &out, &errOut, allFree); code != exitFindings {
+		t.Fatalf("exit %d, want %d; out: %s", code, exitFindings, out.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte(`"rule": "field:uts"`)) {
+		t.Errorf("report lacks field:uts finding:\n%s", out.String())
+	}
+	out.Reset()
+	if code := run([]string{"validate", "-f", path, "-allow", "web:field:uts"}, &out, &errOut, allFree); code != exitOK {
+		t.Fatalf("approved field: exit %d, want %d; out: %s", code, exitOK, out.String())
+	}
+}
