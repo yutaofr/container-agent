@@ -42,7 +42,9 @@ public class Main {
 
 // compileInJDK is the "host toolchain" for these tests: the host has no Java, so javac runs
 // in a JDK container. From the Runner's point of view it is just the developer's command.
-const compileInJDK = `docker run --rm -v "$PWD":/src -w /src eclipse-temurin:17-jdk sh -c ` +
+// It runs as the invoking user: on Linux a root container would leave root-owned files in
+// the bind-mounted temp dir that the test cannot delete (Docker Desktop hides this on macOS).
+const compileInJDK = `docker run --rm --user "$(id -u):$(id -g)" -v "$PWD":/src -w /src eclipse-temurin:17-jdk sh -c ` +
 	`'mkdir -p target/classes && javac -d target/classes Main.java && jar --create --file target/demo.jar --main-class Main -C target/classes .'`
 
 // demoJar compiles mainJava into a runnable jar and returns its bytes.
