@@ -57,3 +57,24 @@ func TestGuard(t *testing.T) {
 		t.Errorf("symlink escape: got %v, want ErrOutside", err)
 	}
 }
+
+// A dangling symlink has no real target to resolve, so a naive "missing final element"
+// fallback would report it as inside the workspace while a write would follow it out.
+func TestGuardRejectsDanglingSymlink(t *testing.T) {
+	ws := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(ws, "dangling")
+	if err := os.Symlink(filepath.Join(outside, "not-yet"), link); err != nil {
+		t.Fatal(err)
+	}
+	g, err := New(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.CheckWrite(link); !errors.Is(err, ErrOutside) {
+		t.Errorf("write through dangling symlink: got %v, want ErrOutside", err)
+	}
+	if _, err := g.CheckRead(link); !errors.Is(err, ErrOutside) {
+		t.Errorf("read through dangling symlink: got %v, want ErrOutside", err)
+	}
+}

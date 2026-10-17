@@ -87,6 +87,11 @@ func resolve(path string) (string, error) {
 	if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
+	// EvalSymlinks also fails for a dangling symlink. Its target is unknown, so a write
+	// through it could land anywhere; only a truly absent final element may fall through.
+	if fi, lerr := os.Lstat(abs); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("%w: dangling symlink %s", ErrOutside, path)
+	}
 	parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
 	if err != nil {
 		return "", err
