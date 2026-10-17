@@ -109,6 +109,7 @@ flowchart LR
 - Names every compose project `cagent-<cluster>`. Before `down`, it checks that every container in the project carries `cagent.managed=true`, so it never touches a project it did not start.
 - Writes workspace files by opening the declared path with `O_NOFOLLOW` after the guard check, so a symlink planted between the check and the write is refused.
 - Runs L3 probes from a throwaway `busybox` container on the cluster network, because container IPs are not reachable from the host on every platform (Docker Desktop on macOS, for one).
+- Checks a published host port the way Docker will use it: it must bind on the IPv4 wildcard, IPv4 loopback, and IPv6 wildcard, each probed with `SO_REUSEADDR` cleared. With the option set, as Go sets it by default, macOS lets a wildcard bind succeed while another program holds the port on a specific address, and a real conflict would be missed. Ports published by the cluster's own managed containers count as free, so re-applying a fix never sees the running cluster as a conflict with itself.
 
 ### 3.3 POC vs. production
 
@@ -269,6 +270,18 @@ Strip timestamps, container IDs, IPs, port numbers, and similar variables, then 
 
 Fix in dependency order, upstream first. While an upstream service is unhealthy, treat downstream connection errors as symptoms.
 
+T0 rules in the POC (`platform/src/cagent/rules.py`). Each turns one problem into a JSON Patch inside the environment whitelist, or declines:
+
+| Rule | Problem (signature kind) | Fix | Declines when |
+|---|---|---|---|
+| `port_conflict` | `port:conflict` from validate, `bind:address_in_use` at runtime | move the published host port up by 1000 until unused in the document | the new port would exceed 65535 |
+| `oom_killed` | `oom:killed` | double `mem_limit` (512m when unset) | already at 4096m |
+| `java_heap` | `oom:app` | double `-Xmx` in `JAVA_OPTS`, keep `mem_limit` ≥ 2 × heap | no `-Xmx`, or the heap would pass 2048m |
+| `arch_mismatch` | `image:arch_mismatch` | add `platform: linux/amd64` | a platform is already set |
+| `slow_start` | `health:unhealthy` with no error lines | double `start_period` (at least 30 s) and `retries` | no healthcheck, or already 10 min |
+
+"Dependency not ready" needs no rule: the generator already emits `depends_on: service_healthy`, and `upstream_first` drops a consumer's connection errors while its provider is broken.
+
 ### 5.4 Fix format and boundary
 
 Every fix is a structured patch: a JSON Patch against the compose file, or a diff against a config file or Dockerfile. A whitelist validator checks each patch path. A patch that touches a source path stops the loop and produces a "source-code issue" diagnosis.
@@ -276,8 +289,8 @@ Every fix is a structured patch: a JSON Patch against the compose file, or a dif
 ### 5.5 Budgets and stop conditions
 
 - At most 3 attempts per error signature, 10 rounds overall, and 30 minutes; plus token and cost caps. Each cluster may override these.
-- The same patch (by hash) never runs twice. If the signature survives a fix, the node moves up one model tier.
-- A patch that reverts an earlier patch counts as oscillation and escalates to a human immediately.
+- Every fix produces a new compose document whose canonical fingerprint is recorded. A fix that would recreate a document already seen, by repeating a patch or reverting an earlier one, counts as oscillation and escalates immediately.
+- If the signature survives a fix, the node moves up one model tier (M7).
 
 ### 5.6 Escalate to a human
 
