@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -13,11 +14,14 @@ import (
 
 	"github.com/compose-spec/compose-go/v2/types"
 
+	"github.com/yutaofr/container-agent/runner/internal/builder"
 	"github.com/yutaofr/container-agent/runner/internal/cluster"
 	"github.com/yutaofr/container-agent/runner/internal/compose"
 	"github.com/yutaofr/container-agent/runner/internal/dockercli"
+	"github.com/yutaofr/container-agent/runner/internal/maven"
 	"github.com/yutaofr/container-agent/runner/internal/signals"
 	"github.com/yutaofr/container-agent/runner/internal/verify"
+	"github.com/yutaofr/container-agent/runner/internal/workdir"
 	"github.com/yutaofr/container-agent/runner/internal/workspace"
 )
 
@@ -33,7 +37,8 @@ const usage = `usage:
   cagent-runner up       -name N -f compose.yaml [-workspace DIR] [-allow svc:rule,...]
   cagent-runner snapshot -name N
   cagent-runner verify   -name N [-probes probes.json]
-  cagent-runner down     -name N`
+  cagent-runner down     -name N
+  cagent-runner build    -name N -service S -tag cagent/S:REF (-maven G:A:V[:EXT] [-settings F] | -workdir DIR) [-stack S] [-jdk V]`
 
 // Report is the JSON that validate prints, and that up prints when it refuses to start.
 type Report struct {
@@ -62,6 +67,7 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 	}
 	cmds := map[string]func([]string, io.Writer, io.Writer, deps) int{
 		"validate": runValidate, "up": runUp, "snapshot": runSnapshot, "verify": runVerify, "down": runDown,
+		"build": runBuild,
 	}
 	cmd, ok := cmds[args[0]]
 	if !ok {
@@ -239,6 +245,130 @@ func runDown(args []string, stdout, stderr io.Writer, d deps) int {
 		return exitError
 	}
 	return writeOrFail(stdout, stderr, map[string]string{"project": cluster.Project(name), "status": "removed"})
+}
+
+// BuildResult is the JSON that build prints. On failure Error and Log are set instead of
+// Cached, and the exit code is exitFindings so the platform can diagnose the log.
+type BuildResult struct {
+	Image   string   `json:"image"`
+	Source  string   `json:"source"`
+	Version string   `json:"version,omitempty"` // resolved repository version
+	SHA256  string   `json:"sha256,omitempty"`
+	Cached  bool     `json:"cached"`
+	Error   string   `json:"error,omitempty"`
+	Log     []string `json:"log,omitempty"`
+}
+
+func runBuild(args []string, stdout, stderr io.Writer, d deps) int {
+	fs := flag.NewFlagSet("build", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	name := fs.String("name", "", "cluster name")
+	service := fs.String("service", "", "compose service the image is for")
+	tag := fs.String("tag", "", "image tag, cagent/<service>:<ref>")
+	coord := fs.String("maven", "", "repository artifact, group:artifact:version[:ext]")
+	dir := fs.String("workdir", "", "working directory holding .cagent/service.yaml")
+	settings := fs.String("settings", "", "Maven settings.xml (default ~/.m2/settings.xml)")
+	stack := fs.String("stack", "", "builder stack (default: the descriptor's, else java-springboot)")
+	jdk := fs.String("jdk", "", "Java major version (default "+builder.DefaultJDK+")")
+	if err := fs.Parse(args); err != nil {
+		return exitError
+	}
+	usageErr := func(msg string) int { fmt.Fprintln(stderr, msg); return exitError }
+	switch {
+	case !workspace.ValidName(*name) || !workspace.ValidName(*service):
+		return usageErr("build needs valid -name and -service")
+	case !builder.ValidTag(*tag):
+		return usageErr(fmt.Sprintf("invalid -tag %q: must be cagent/<service>:<ref>", *tag))
+	case (*coord == "") == (*dir == ""):
+		return usageErr("build needs exactly one of -maven or -workdir")
+	}
+	w, err := openWorkspace(d)
+	if err != nil {
+		return usageErr(err.Error())
+	}
+	buildDir, err := w.BuildDir(*name, *service)
+	if err != nil {
+		return usageErr(err.Error())
+	}
+
+	ctx := context.Background()
+	res := BuildResult{Image: *tag}
+	// failed reports a build that ran and failed: the platform gets the error and log.
+	failed := func(err error) int {
+		res.Error = err.Error()
+		var wb *workdir.BuildError
+		var db *builder.BuildError
+		switch {
+		case errors.As(err, &wb):
+			res.Error, res.Log = wb.Err.Error(), wb.Log
+		case errors.As(err, &db):
+			res.Error, res.Log = db.Err.Error(), db.Log
+		}
+		_ = writeJSON(stdout, res)
+		return exitFindings
+	}
+
+	if *coord != "" {
+		c, err := maven.ParseCoord(*coord)
+		if err != nil {
+			return usageErr(err.Error())
+		}
+		path := *settings
+		if path == "" {
+			if path, err = maven.DefaultSettingsPath(); err != nil {
+				return usageErr(err.Error())
+			}
+		}
+		repo, err := maven.LoadRepo(path)
+		if err != nil {
+			return usageErr(err.Error())
+		}
+		client := maven.Client{Repo: repo}
+		art, err := client.Resolve(ctx, c)
+		if err != nil {
+			return failed(err)
+		}
+		res.Source, res.Version = "maven:"+c.String(), art.Resolved
+		if _, res.SHA256, err = client.Download(ctx, art, buildDir, builder.ArtifactFile); err != nil {
+			return failed(err)
+		}
+	} else {
+		abs, err := filepath.Abs(*dir)
+		if err != nil {
+			return usageErr(err.Error())
+		}
+		desc, err := workdir.LoadDescriptor(abs)
+		if err != nil {
+			return usageErr(err.Error())
+		}
+		res.Source = "workdir:" + abs
+		if *stack == "" {
+			*stack = desc.Stack
+		}
+		artifact, err := workdir.Build(ctx, abs, desc)
+		if err != nil {
+			return failed(err)
+		}
+		src, err := os.Open(artifact)
+		if err != nil {
+			return failed(err)
+		}
+		_, res.SHA256, err = workspace.WriteNoFollow(buildDir, builder.ArtifactFile, src)
+		src.Close()
+		if err != nil {
+			return failed(err)
+		}
+	}
+	if *stack == "" {
+		*stack = "java-springboot"
+	}
+	res.Cached, err = builder.Build(ctx, d.docker, builder.Request{
+		Tag: *tag, Stack: *stack, JDK: *jdk, Dir: buildDir, SHA256: res.SHA256,
+	})
+	if err != nil {
+		return failed(err)
+	}
+	return writeOrFail(stdout, stderr, res)
 }
 
 // parseName parses a subcommand that takes -name plus optional extra flags.
