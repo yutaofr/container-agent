@@ -1,0 +1,12 @@
+name: redis
+kind: middleware
+provides: { capability: redis }
+image: "redis:{version}"
+versions: ["7.4"]
+default_version: "7.4"
+port: 6379
+healthcheck:
+  cmd: ["CMD", "redis-cli", "ping"]
+presets:
+  tiny: { mem_limit: 128m, cpus: 0.25 }
+  standard: { mem_limit: 256m, cpus: 0.5 }

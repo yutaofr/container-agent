@@ -1,0 +1,26 @@
+name: kafka
+kind: middleware
+provides: { capability: kafka }
+image: "apache/kafka:{version}"
+versions: ["3.9.0", "4.0.0"]
+default_version: "3.9.0"
+port: 9092
+# Single-node KRaft broker. Clients inside the cluster reach it as {{host}}:9092.
+env:
+  KAFKA_NODE_ID: "1"
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+  KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://{{host}}:9092
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+  KAFKA_HEAP_OPTS: -Xmx256m -Xms256m
+healthcheck:
+  cmd: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null"]
+presets:
+  tiny: { mem_limit: 768m, cpus: 0.5 }
+  standard: { mem_limit: 1536m, cpus: 1.0 }

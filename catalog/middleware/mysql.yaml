@@ -1,0 +1,24 @@
+name: mysql
+kind: middleware
+provides: { capability: mysql }
+image: "mysql:{version}"
+versions: ["8.0", "8.4"]
+default_version: "8.4"
+port: 3306
+# Throwaway prototype credentials; clusters never hold real data.
+connection:
+  db: app
+  user: app
+  password: app
+env:
+  MYSQL_DATABASE: "{{db}}"
+  MYSQL_USER: "{{user}}"
+  MYSQL_PASSWORD: "{{password}}"
+  MYSQL_ROOT_PASSWORD: root
+healthcheck:
+  # TCP to 127.0.0.1 fails while the entrypoint's init server runs with skip-networking,
+  # so the check turns healthy only once the real server accepts connections.
+  cmd: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u{{user}} -p{{password}} --silent"]
+presets:
+  tiny: { mem_limit: 512m, cpus: 0.5 }
+  standard: { mem_limit: 1g, cpus: 1.0 }
