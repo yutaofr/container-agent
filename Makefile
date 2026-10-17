@@ -1,7 +1,14 @@
-.PHONY: runner-test runner-build
+.PHONY: runner-test runner-build platform-test e2e
 
 runner-test:
 	cd runner && test -z "$$(gofmt -l .)" && go vet ./... && go test ./...
 
 runner-build:
 	cd runner && go build -o ../bin/cagent-runner ./cmd/cagent-runner
+
+platform-test:
+	cd platform && uv run ruff check . && uv run ruff format --check . && uv run pytest
+
+# Generated compose files must pass the real validate command.
+e2e: runner-build
+	cd platform && CAGENT_RUNNER=$(CURDIR)/bin/cagent-runner uv run pytest tests/test_cli.py
