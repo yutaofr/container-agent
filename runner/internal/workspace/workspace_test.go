@@ -1,8 +1,10 @@
 package workspace
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -80,5 +82,52 @@ func TestRejectsBadNames(t *testing.T) {
 		if _, err := w.WriteFile("demo", file, nil); err == nil {
 			t.Errorf("WriteFile accepted file name %q", file)
 		}
+	}
+}
+
+func TestBuildDir(t *testing.T) {
+	root := t.TempDir()
+	w, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := w.BuildDir("demo", "order-service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, "clusters", "demo", "build", "order-service"); dir != want {
+		t.Errorf("BuildDir = %s, want %s", dir, want)
+	}
+	if _, err := w.BuildDir("demo", "../x"); err == nil {
+		t.Error("BuildDir accepted ../x")
+	}
+}
+
+func TestWriteNoFollowHashes(t *testing.T) {
+	dir := t.TempDir()
+	path, sum, err := WriteNoFollow(dir, "app.jar", strings.NewReader("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// sha256("hello")
+	if sum != "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" {
+		t.Errorf("sha256 = %s", sum)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "hello" {
+		t.Errorf("content = %q", got)
+	}
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+
+func TestWriteNoFollowRemovesPartialFile(t *testing.T) {
+	dir := t.TempDir()
+	if _, _, err := WriteNoFollow(dir, "app.jar", failingReader{}); err == nil {
+		t.Fatal("want error from failing reader")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "app.jar")); !os.IsNotExist(err) {
+		t.Errorf("partial file left behind: %v", err)
 	}
 }

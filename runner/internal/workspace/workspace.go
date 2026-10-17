@@ -2,7 +2,11 @@
 package workspace
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -52,33 +56,62 @@ func (w *Workspace) ClusterDir(name string) (string, error) {
 	return dir, nil
 }
 
-// WriteFile writes data to file, a plain file name, inside the cluster's directory. The
-// guard rejects a path that resolves outside the directory. The open then uses the declared
-// path, not the resolved one, with O_NOFOLLOW, so it refuses any symlink in the final
-// element, including one planted after the check: this closes the check-then-write race.
+// WriteFile writes data to file, a plain file name, inside the cluster's directory.
 func (w *Workspace) WriteFile(cluster, file string, data []byte) (string, error) {
-	if file != filepath.Base(file) || file == "." || file == ".." {
-		return "", fmt.Errorf("invalid file name %q", file)
+	dir, err := w.ClusterDir(cluster)
+	if err != nil {
+		return "", err
+	}
+	path, _, err := WriteNoFollow(dir, file, bytes.NewReader(data))
+	return path, err
+}
+
+// BuildDir returns the docker build context for one service of a cluster, creating it
+// if needed.
+func (w *Workspace) BuildDir(cluster, service string) (string, error) {
+	if !ValidName(service) {
+		return "", fmt.Errorf("invalid service name %q", service)
 	}
 	dir, err := w.ClusterDir(cluster)
 	if err != nil {
 		return "", err
 	}
+	build := filepath.Join(dir, "build", service)
+	if err := os.MkdirAll(build, 0o700); err != nil {
+		return "", err
+	}
+	return build, nil
+}
+
+// WriteNoFollow streams r into file, a plain file name inside dir, and returns the path
+// and the hex SHA-256 of the bytes written. The guard rejects a path that resolves outside
+// dir. The open then uses the declared path, not the resolved one, with O_NOFOLLOW, so it
+// refuses any symlink in the final element, including one planted after the check: this
+// closes the check-then-write race. A failed copy removes the partial file.
+func WriteNoFollow(dir, file string, r io.Reader) (string, string, error) {
+	if file != filepath.Base(file) || file == "." || file == ".." {
+		return "", "", fmt.Errorf("invalid file name %q", file)
+	}
 	g, err := guard.New(dir)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	path := filepath.Join(dir, file)
 	if _, err := g.CheckWrite(path); err != nil {
-		return "", err
+		return "", "", err
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return "", fmt.Errorf("open %s: %w", path, err)
+		return "", "", fmt.Errorf("open %s: %w", path, err)
 	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return "", err
+	h := sha256.New()
+	_, err = io.Copy(io.MultiWriter(f, h), r)
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
-	return path, f.Close()
+	if err != nil {
+		os.Remove(path)
+		return "", "", fmt.Errorf("write %s: %w", path, err)
+	}
+	return path, hex.EncodeToString(h.Sum(nil)), nil
 }
