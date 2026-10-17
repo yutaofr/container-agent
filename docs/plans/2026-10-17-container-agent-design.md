@@ -406,7 +406,38 @@ sequenceDiagram
 
 - **Runner authentication**: the user signs in to the web UI via SSO and registers the device, receiving a revocable token bound to user and device. Connections use WSS.
 - **Tool argument checks**: file access stays inside `~/.cagent/`; declared working directories are read-only. Docker operations touch only compose projects labelled `cagent.managed=true`.
-- **Compose security lint**: reject `privileged`, `docker.sock` mounts, `network_mode: host`, host mounts outside the workspace, and `cap_add` by default. The user can allow each one individually during approval.
+- **Compose security lint**: the Runner rejects every setting in the table below by default. The user can allow each one individually during approval, as `service:rule` (for example `web:privileged`). For a top-level volume the name before the colon is the volume name (for example `data:volume-driver`).
+
+  | Rule ID | What it catches |
+  | --- | --- |
+  | `privileged` | `privileged: true` |
+  | `host-network` | `network_mode: host` |
+  | `pid-host` | `pid: host`, which exposes host processes |
+  | `ipc-host` | `ipc: host`, which shares host IPC and shared memory |
+  | `userns-host` | `userns_mode: host`, which turns off user-namespace remapping |
+  | `cap-add` | any `cap_add` entry |
+  | `devices` | any `devices` entry, which maps host devices into the container |
+  | `security-opt` | `seccomp` or `apparmor` set to `unconfined`, `label=disable` (or `label:disable`), `no-new-privileges:false` |
+  | `cgroup-parent` | any `cgroup_parent`, which places the container in a host cgroup |
+  | `docker-sock` | a mount of the Docker socket, or of a directory that contains it (such as `/var/run` or `/run`) |
+  | `host-mount` | a bind mount, or a local volume with `driver_opts` `device` plus `o: bind` (or `type: none`), whose source is outside the workspace |
+  | `volume-driver` | a top-level volume with any driver other than `local`, because its options are opaque to the Runner |
+
+  Mount sources are checked after symlink resolution, and the check fails closed: a source that cannot be resolved, including a dangling symlink, is reported as `host-mount`. The finding shows the path as declared in the compose file.
+
+```mermaid
+flowchart TD
+  S["Bind source, or volume driver_opts device"] --> L{"Declared path ends<br/>in docker.sock?"}
+  L -->|yes| DS["docker-sock"]
+  L -->|no| R{"Resolve symlinks"}
+  R -->|"error or dangling link"| HM1["host-mount (fail closed)"]
+  R -->|resolved| D{"Resolved path is a Docker socket<br/>or contains one?"}
+  D -->|yes| DS
+  D -->|no| W{"Inside the workspace<br/>(also resolved)?"}
+  W -->|no| HM2["host-mount"]
+  W -->|yes| OK["Allowed"]
+```
+
 - **Credentials and redaction**: credentials never leave the machine. The Runner redacts diagnostic snapshots (passwords, tokens, AK/SK, passwords inside JDBC URLs) before upload, so neither the platform nor any model sees raw logs.
 - **Audit**: the platform logs every tool call, patch, and approval, replayable per cluster.
 
