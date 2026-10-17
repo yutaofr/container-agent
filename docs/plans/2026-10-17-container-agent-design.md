@@ -318,27 +318,29 @@ flowchart LR
   subgraph SOURCES["Service sources"]
     REL["release"]
     SNAP["snapshot"]
-    CIA["ci"]
+    CIA["ci (after the POC)"]
     WDIR["workdir"]
   end
-  REL -->|"Nexus, local creds"| ART
-  SNAP -->|"resolve timestamped version"| ART
-  CIA -->|"CI API, user token"| ART
-  WDIR -->|"run build cmd, read output"| ART
-  ART["Local artifact + sha256"] --> CACHE{"Tag exists?<br/>cagent/svc:source-sha12"}
-  CACHE -->|yes| IMG["Image ready"]
-  CACHE -->|no| TPL["Builder template by stack<br/>java-springboot → temurin JRE + jar"]
-  TPL --> BUILD["docker build"]
+  REL -->|"settings.xml mirror + server"| DL["Download and<br/>verify .sha1"]
+  SNAP -->|"maven-metadata.xml →<br/>timestamped build"| DL
+  CIA -.->|"CI API, user token"| DL
+  WDIR -->|"command from the project's own<br/>.cagent/service.yaml"| ART
+  DL --> ART["build/SERVICE/app.jar<br/>+ sha256"]
+  ART --> CACHE{"Image label<br/>cagent.artifact-sha256<br/>equals the artifact's?"}
+  CACHE -->|yes| IMG["Image ready (cached)"]
+  CACHE -->|no| TPL["Dockerfile from the stack template<br/>java-springboot → eclipse-temurin JRE + jar"]
+  TPL --> BUILD["docker build, labelled"]
   BUILD --> IMG
 ```
 
 | Source | Runner action |
 |---|---|
-| release / snapshot | Download with the local Nexus credentials. Resolve a snapshot to its timestamped version (e.g. `2.0-20261016.031522-7`) and record it in the tuning log so the cluster is reproducible |
-| ci | Download the artifact through the Jenkins / GitLab API with the user's CI token |
-| workdir | Run the `build` command locally and read the `output` artifact. The working directory is read-only |
+| release / snapshot | Use the first `<mirror>` in `~/.m2/settings.xml` that covers `*` or `central`, with the `<server>` of the same id. Credentials may be plain or `${env.VAR}`; encrypted `{…}` passwords are rejected with a clear error. Resolve a snapshot through `maven-metadata.xml` to its timestamped build (e.g. `2.0-20261016.031522-7`) and report it, so the cluster is reproducible. Verify the download against the repository's `.sha1` when one is published. |
+| ci | After the POC: download through the Jenkins / GitLab API with the user's CI token |
+| workdir | Read the build command and output glob from the project's own `.cagent/service.yaml`, run the command with the developer's toolchain in that directory, and require exactly one artifact that resolves inside it. The platform only names the directory, so it can never make the Runner run a command the developer did not write. |
 
-- **Image cache**: tag images `cagent/<svc>:<source>-<first 12 chars of artifact sha256>`; skip the build when the artifact is unchanged.
+- **Image tags and cache**: images keep the generator's tag `cagent/<service>:<source>-<ref>` and carry the label `cagent.artifact-sha256`. A build is skipped when the existing image's label matches the artifact: a new snapshot build under the same tag rebuilds, an unchanged artifact does not.
+- **Stack templates**: `java-springboot` renders `FROM eclipse-temurin:<jdk>-jre` (JDK 21 unless the request names another) plus the jar. The JRE images ship `curl`, which the generated HTTP healthchecks use.
 - **Single-service rebuild**: after a code change in a working directory, replace just that service's container in one step.
 - **Unregistered projects**: the agent reads pom, gradle, package.json, go.mod, and any existing Dockerfile to draft a descriptor. Once the cluster works, the user can submit the draft to the project repository as a PR.
 
@@ -515,6 +517,7 @@ flowchart TD
 ```
 
 - **Reviewed-field allow-list**: the deny-list above names known escape vectors; the allow-list closes the rest. `runner/internal/compose/allowed_fields.json` lists the top-level and service keys the generator emits or that cannot weaken isolation. `validate` checks the keys in effect after YAML anchors, `extends`, and `include` are applied, and reports every other key as `field:<key>`, approvable one key at a time (`web:field:sysctls`, or `*:field:configs` for a top-level key). A key that already triggered a specific rule above is not reported twice. Keys starting with `x-` are compose extensions and always allowed. The platform's tests read the same file, so the generator cannot emit a key `validate` would reject.
+- **Build commands**: the Runner runs a working-directory build command only from that project's own `.cagent/service.yaml`. The platform can name a directory to build but cannot supply a command, and the artifact the build produces must resolve inside the directory.
 - **Credentials and redaction**: credentials never leave the machine. The Runner redacts diagnostic snapshots (passwords, tokens, AK/SK, passwords inside JDBC URLs) before upload, so neither the platform nor any model sees raw logs.
 - **Audit**: the platform logs every tool call, patch, and approval, replayable per cluster.
 
