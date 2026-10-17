@@ -110,3 +110,121 @@ def test_patches_outside_the_environment_are_flagged():
 
 def test_fingerprint_is_order_independent():
     assert fingerprint({"a": 1, "b": {"c": 2}}) == fingerprint({"b": {"c": 2}, "a": 1})
+
+
+# --- the environment gate (Task 9) ----------------------------------------------------------
+
+
+def op(name: str, path: str, **extra) -> dict:
+    return {"op": name, "path": path, **extra}
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        [op("replace", "/services/db/ports/0", value="15306:3306")],
+        [op("add", "/services/db/ports/-", value="15306:3306")],
+        [op("add", "/services/db/mem_limit", value="512m")],
+        [op("replace", "/services/db/mem_limit", value="1024m")],
+        [op("replace", "/services/app/environment/JAVA_OPTS", value="-Xmx1024m")],
+        [op("add", "/services/legacy/platform", value="linux/amd64")],
+        [op("add", "/services/web/healthcheck/start_period", value="30s")],
+        [op("replace", "/services/web/healthcheck/retries", value=60)],
+        [op("add", "/services/web/healthcheck/interval", value="10s")],
+        [op("add", "/services/web/healthcheck/timeout", value="5s")],
+        [op("remove", "/services/web/cpus")],
+        [op("test", "/services/web/mem_limit", value="64m")],
+        [op("add", "/services/web/environment", value={"LOG_LEVEL": "debug"})],
+        [op("add", "/services/web/environment/~1LD_X", value="1")],  # key "/LD_X", not "LD_X"
+    ],
+)
+def test_gate_allows_what_the_rules_need(patch):
+    assert within_environment(patch)
+
+
+def test_every_rules_fix_passes_the_gate():
+    """A future narrowing of the gate must not silently disable a rule."""
+    cases = [
+        (Problem("port:conflict", "db", "13306"), compose(db={"ports": ["13306:3306"]})),
+        (Problem("bind:address_in_use", "web"), compose(web={"ports": ["8080:80", "8443:443"]})),
+        (Problem("oom:killed", "db"), compose(db={"mem_limit": "512m"})),
+        (Problem("oom:killed", "db"), compose(db={})),
+        (
+            Problem("oom:app", "app"),
+            compose(app={"environment": {"JAVA_OPTS": "-Xmx512m"}, "mem_limit": "768m"}),
+        ),
+        (
+            Problem("oom:app", "app"),
+            compose(app={"environment": {"JAVA_OPTS": "-Xmx512m"}}),  # adds mem_limit
+        ),
+        (Problem("image:arch_mismatch", "legacy"), compose(legacy={"image": "old:1"})),
+        (
+            Problem("health:unhealthy", "web"),
+            compose(web={"healthcheck": {"test": ["CMD", "true"], "retries": 30}}),
+        ),
+        (
+            Problem("health:unhealthy", "web"),
+            compose(web={"healthcheck": {"test": ["CMD", "true"], "start_period": "10s"}}),
+        ),
+    ]
+    for problem, doc in cases:
+        fix = first_fix(problem, doc)
+        assert fix is not None, problem
+        assert within_environment(fix.patch), (problem, fix.patch)
+
+
+@pytest.mark.parametrize(
+    "why, patch",
+    [
+        (
+            "copy carries a source pointer",
+            [op("copy", "/services/db/environment/X", **{"from": "/services/db/image"})],
+        ),
+        ("move", [op("move", "/services/db/mem_limit", **{"from": "/services/db/image"})]),
+        ("unknown op", [op("frobnicate", "/services/db/mem_limit", value="1g")]),
+        ("missing op", [{"path": "/services/db/mem_limit", "value": "1g"}]),
+        ("missing path", [{"op": "remove"}]),
+        (
+            "a from on an allowed op",
+            [op("add", "/services/db/mem_limit", value="1g", **{"from": "/x"})],
+        ),
+        ("trailing newline", [op("replace", "/services/db/mem_limit\n", value="1g")]),
+        ("newline in the service name", [op("replace", "/services/db\n/mem_limit", value="1g")]),
+        ("extra segment", [op("replace", "/services/db/mem_limit/extra", value="1g")]),
+        (
+            "healthcheck test command",
+            [op("replace", "/services/db/healthcheck/test", value=["CMD", "x"])],
+        ),
+        (
+            "whole healthcheck object",
+            [op("replace", "/services/db/healthcheck", value={"test": ["CMD", "x"]})],
+        ),
+        ("LD_PRELOAD key", [op("add", "/services/db/environment/LD_PRELOAD", value="/x.so")]),
+        ("DYLD key", [op("add", "/services/db/environment/DYLD_INSERT_LIBRARIES", value="/x")]),
+        (
+            "LD_ key inside the whole mapping",
+            [op("replace", "/services/db/environment", value={"A": "1", "LD_LIBRARY_PATH": "/x"})],
+        ),
+        (
+            "DYLD_ entry inside a list-form environment",
+            [op("add", "/services/db/environment", value=["A=1", "DYLD_LIBRARY_PATH=/x"])],
+        ),
+        (
+            "LD_ entry appended to a list",
+            [op("add", "/services/db/environment/-", value="LD_PRELOAD=/x")],
+        ),
+        ("escaped slash after LD_", [op("add", "/services/db/environment/LD_A~1B", value="1")]),
+        ("invalid escape", [op("add", "/services/db/environment/A~2", value="1")]),
+        (
+            "one bad op among good ones",
+            [
+                op("replace", "/services/db/mem_limit", value="1g"),
+                op("replace", "/services/db/image", value="evil"),
+            ],
+        ),
+        ("empty path", [op("add", "", value={})]),
+        ("not a patch operation", ["replace"]),
+    ],
+)
+def test_gate_rejects(why, patch):
+    assert not within_environment(patch), why
