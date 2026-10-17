@@ -49,8 +49,10 @@ func TestUpRefusesFindings(t *testing.T) {
 	if code := run([]string{"up", "-name", "demo", "-f", src}, &out, &errOut, d); code != exitFindings {
 		t.Fatalf("exit %d, want %d", code, exitFindings)
 	}
-	if len(f.Calls) != 0 {
-		t.Errorf("docker called despite findings: %v", f.Calls)
+	for _, c := range f.Calls {
+		if strings.Contains(c, " up ") {
+			t.Errorf("cluster started despite findings: %v", f.Calls)
+		}
 	}
 }
 
@@ -104,6 +106,28 @@ func TestVerifyExitCodes(t *testing.T) {
 		var out, errOut bytes.Buffer
 		if code := run([]string{"verify", "-name", "demo"}, &out, &errOut, d); code != c.want {
 			t.Errorf("state %s: exit %d, want %d; out: %s", c.state, code, c.want, out.String())
+		}
+	}
+}
+
+func TestOwnPublishedPortsAreNotConflicts(t *testing.T) {
+	src := writeFile(t, "services:\n  redis: { image: redis:7.4, ports: [\"61283:6379\"] }\n")
+	for _, c := range []struct {
+		labels string
+		want   int
+	}{
+		{`{"cagent.managed":"true"}`, exitOK}, // the cluster's own running redis
+		{`{}`, exitFindings},                  // someone else's container claiming the name
+	} {
+		d, _, _ := withDocker(t, map[string]dockercli.FakeResponse{
+			psDemo: {Out: "aaa\n"},
+			"inspect aaa": {Out: `[{"Id":"aaa","Config":{"Labels":` + c.labels + `},
+				"NetworkSettings":{"Ports":{"6379/tcp":[{"HostIp":"0.0.0.0","HostPort":"61283"}]}}}]`},
+		})
+		d.free = func(port int) bool { return port != 61283 } // the port is held on the host
+		var out, errOut bytes.Buffer
+		if code := run([]string{"validate", "-name", "demo", "-f", src}, &out, &errOut, d); code != c.want {
+			t.Errorf("labels %s: exit %d, want %d; out %s", c.labels, code, c.want, out.String())
 		}
 	}
 }

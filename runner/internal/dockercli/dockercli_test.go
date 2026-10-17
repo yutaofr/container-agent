@@ -2,6 +2,7 @@ package dockercli
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 )
 
@@ -50,5 +51,18 @@ func TestProjectContainersEmpty(t *testing.T) {
 	}
 	if len(f.Calls) != 1 {
 		t.Errorf("inspect should not run for an empty project; calls: %v", f.Calls)
+	}
+}
+
+func TestPublishedPorts(t *testing.T) {
+	var cs []Container
+	if err := json.Unmarshal([]byte(`[{"NetworkSettings":{"Ports":{
+		"6379/tcp":[{"HostIp":"0.0.0.0","HostPort":"61283"},{"HostIp":"::","HostPort":"61283"}],
+		"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"18080"}],
+		"9090/tcp":null}}}]`), &cs); err != nil {
+		t.Fatal(err)
+	}
+	if got := cs[0].PublishedPorts(); len(got) != 2 || got[0] != 18080 || got[1] != 61283 {
+		t.Errorf("PublishedPorts() = %v, want [18080 61283]", got)
 	}
 }

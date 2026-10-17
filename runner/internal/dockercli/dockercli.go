@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -64,6 +66,29 @@ type Container struct {
 	Config struct {
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
+	NetworkSettings struct {
+		Ports map[string][]struct {
+			HostIP   string `json:"HostIp"`
+			HostPort string `json:"HostPort"`
+		} `json:"Ports"`
+	} `json:"NetworkSettings"`
+}
+
+// PublishedPorts returns the host ports the container publishes, deduplicated across
+// IPv4 and IPv6 bindings.
+func (c Container) PublishedPorts() []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, bindings := range c.NetworkSettings.Ports {
+		for _, b := range bindings {
+			if p, err := strconv.Atoi(b.HostPort); err == nil && !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	sort.Ints(out)
+	return out
 }
 
 // Service returns the compose service name of the container.
