@@ -78,3 +78,49 @@ func TestGuardRejectsDanglingSymlink(t *testing.T) {
 		t.Errorf("read through dangling symlink: got %v, want ErrOutside", err)
 	}
 }
+
+func TestResolve(t *testing.T) {
+	base := t.TempDir()
+	real, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(real, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(base, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(real, "gone"), filepath.Join(base, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+
+	ok := []struct{ name, in, want string }{
+		{"existing path", base, real},
+		{"through symlink", filepath.Join(base, "link"), target},
+		{"missing leaf", filepath.Join(base, "new"), filepath.Join(real, "new")},
+		{"several missing levels", filepath.Join(base, "a", "b", "c"), filepath.Join(real, "a", "b", "c")},
+		{"missing below symlinked dir", filepath.Join(base, "link", "x", "y"), filepath.Join(target, "x", "y")},
+	}
+	for _, c := range ok {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := Resolve(c.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != c.want {
+				t.Errorf("Resolve(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+
+	for _, in := range []string{
+		filepath.Join(base, "dangling"),
+		filepath.Join(base, "dangling", "sub"),
+	} {
+		if _, err := Resolve(in); !errors.Is(err, ErrOutside) {
+			t.Errorf("Resolve(%q): got %v, want ErrOutside", in, err)
+		}
+	}
+}

@@ -20,13 +20,13 @@ type Guard struct {
 
 // New builds a Guard. Roots are resolved through symlinks so later checks compare real paths.
 func New(workspace string, readOnly ...string) (*Guard, error) {
-	ws, err := resolve(workspace)
+	ws, err := Resolve(workspace)
 	if err != nil {
 		return nil, fmt.Errorf("workspace: %w", err)
 	}
 	g := &Guard{workspace: ws}
 	for _, r := range readOnly {
-		rr, err := resolve(r)
+		rr, err := Resolve(r)
 		if err != nil {
 			return nil, fmt.Errorf("read-only root %s: %w", r, err)
 		}
@@ -37,7 +37,7 @@ func New(workspace string, readOnly ...string) (*Guard, error) {
 
 // CheckRead returns the resolved path if it lies in the workspace or a read-only root.
 func (g *Guard) CheckRead(path string) (string, error) {
-	p, err := resolve(path)
+	p, err := Resolve(path)
 	if err != nil {
 		return "", err
 	}
@@ -54,7 +54,7 @@ func (g *Guard) CheckRead(path string) (string, error) {
 
 // CheckWrite returns the resolved path if it lies in the workspace.
 func (g *Guard) CheckWrite(path string) (string, error) {
-	p, err := resolve(path)
+	p, err := Resolve(path)
 	if err != nil {
 		return "", err
 	}
@@ -73,28 +73,34 @@ func Within(root, path string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// resolve makes path absolute and follows symlinks. A missing final element is allowed
-// so callers can check a file before creating it.
-func resolve(path string) (string, error) {
+// Resolve makes path absolute and follows symlinks. Missing trailing elements are allowed
+// so callers can check a file before creating it; they cannot be symlinks, so they are
+// appended to the resolved nearest existing ancestor. A dangling symlink anywhere on the
+// path is refused with ErrOutside: its target is unknown, so a write through it could
+// land anywhere.
+func Resolve(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
-	real, err := filepath.EvalSymlinks(abs)
-	if err == nil {
-		return real, nil
+	var missing []string
+	cur := abs
+	for {
+		real, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return filepath.Join(append([]string{real}, missing...)...), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		if fi, lerr := os.Lstat(cur); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("%w: dangling symlink %s", ErrOutside, cur)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", err
+		}
+		missing = append([]string{filepath.Base(cur)}, missing...)
+		cur = parent
 	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	// EvalSymlinks also fails for a dangling symlink. Its target is unknown, so a write
-	// through it could land anywhere; only a truly absent final element may fall through.
-	if fi, lerr := os.Lstat(abs); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("%w: dangling symlink %s", ErrOutside, path)
-	}
-	parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(parent, filepath.Base(abs)), nil
 }
