@@ -126,6 +126,35 @@ flowchart LR
 - **POC**: the platform, the Runner, and LiteLLM run together on one dev machine via compose.
 - **Production**: the platform runs on internal infrastructure, and Runners connect to it remotely.
 
+### 3.4 Runner protocol
+
+The Runner dials the hub over WebSocket and the two speak JSON-RPC 2.0, with the hub as caller:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant R as Runner (cagent-runner serve)
+  participant H as Runner Hub
+  participant O as Orchestrator
+  R->>H: WebSocket upgrade, Authorization: Bearer token
+  H-->>R: 101, or 401 for an unknown token (Runner stops)
+  R->>H: hello {tools}
+  Note over H: Runner counts as connected only now
+  O->>H: call(runner, "validate", {name, compose})
+  H->>R: {"id": 7, "method": "validate", "params": …}
+  R->>R: write compose into the workspace, run the validate subcommand
+  R-->>H: {"id": 7, "result": {exit_code, output, stderr}}
+  H-->>O: ToolResult
+  Note over R,H: pings both ways keep the link checked during long builds
+  H--xR: hub restarts
+  R->>H: reconnect, backoff 1 s → 30 s, then hello again
+```
+
+- Each tool is one CLI subcommand run in-process, so RPC and CLI share one code path and one output format. The result carries the subcommand's exit code unchanged: validation findings and failed verifications are results, not errors. JSON-RPC errors mean an unknown method or invalid params.
+- Params are decoded strictly (unknown fields are rejected). The platform sends compose files and probes as *content*, which the Runner writes into the cluster workspace; it never names a file on the user's machine. `build` accepts a working directory only inside a `-workdir-root` the user passed to `serve`, and uses the Runner's own Maven settings.
+- The Runner reads the connection continuously and runs calls one at a time on a worker, so it keeps answering pings while a build runs; otherwise the hub would drop it as dead.
+- The hub swaps a reconnecting Runner's new connection in before closing the old one, so no call is routed to a closing connection. A disconnect fails every pending call with `RunnerUnavailable`.
+
 ## 4. Workflow State Machine
 
 Every phase revolves around a **ClusterSpec**, a structured statement of cluster intent. Conversation fills in the ClusterSpec; the compose YAML is generated from it.
@@ -482,7 +511,7 @@ sequenceDiagram
   Note over R,D: Credentials and raw logs never leave the user machine
 ```
 
-- **Runner authentication**: the user signs in to the web UI via SSO and registers the device, receiving a revocable token bound to user and device. Connections use WSS.
+- **Runner authentication**: the user signs in to the web UI via SSO and registers the device, receiving a revocable token bound to user and device. Connections use WSS. In the POC the hub holds a static token-to-runner map, the Runner reads its token from an environment variable (never a flag, so it stays out of `ps`), and a rejected token stops the Runner instead of retrying.
 - **Tool argument checks**: file access stays inside `~/.cagent/`; declared working directories are read-only. Docker operations touch only compose projects labelled `cagent.managed=true`.
 - **Compose security lint**: the Runner rejects every setting in the table below by default. The user can allow each one individually during approval, as `service:rule` (for example `web:privileged`). For a top-level volume the name before the colon is the volume name (for example `data:volume-driver`).
 
