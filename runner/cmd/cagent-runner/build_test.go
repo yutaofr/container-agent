@@ -1,0 +1,132 @@
+package main
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/yutaofr/container-agent/runner/internal/dockercli"
+	"github.com/yutaofr/container-agent/runner/internal/maven/maventest"
+)
+
+const (
+	webTag     = "cagent/web:release-1.0.0"
+	inspectWeb = `image inspect --format {{index .Config.Labels "cagent.artifact-sha256"}} ` + webTag
+)
+
+// buildDeps returns deps whose docker treats the image as missing and accepts any
+// `docker build` of webTag into the web build dir.
+func buildDeps(t *testing.T) (deps, *dockercli.Fake, string) {
+	t.Helper()
+	d, f, root := withDocker(t, nil)
+	f.Responses = map[string]dockercli.FakeResponse{inspectWeb: {Err: errors.New("No such image")}}
+	return d, f, filepath.Join(root, "clusters", "demo", "build", "web")
+}
+
+func expectBuild(f *dockercli.Fake, dir, sha string) {
+	f.Responses["build -t "+webTag+" --label cagent.managed=true --label cagent.artifact-sha256="+sha+
+		" -f "+filepath.Join(dir, "Dockerfile")+" "+dir] = dockercli.FakeResponse{}
+}
+
+func runBuildCmd(t *testing.T, d deps, args ...string) (int, BuildResult, string) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	code := run(append([]string{"build", "-name", "demo", "-service", "web", "-tag", webTag}, args...), &out, &errOut, d)
+	var res BuildResult
+	if out.Len() > 0 {
+		if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+			t.Fatalf("bad JSON %q: %v", out.String(), err)
+		}
+	}
+	return code, res, errOut.String()
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func TestBuildFromMavenRelease(t *testing.T) {
+	repo := maventest.New(t, "dev", "token")
+	repo.PutRelease("com.acme", "web", "1.0.0", []byte("release-jar"))
+	settings := repo.SettingsXML(t, t.TempDir())
+	d, f, dir := buildDeps(t)
+	expectBuild(f, dir, sha256Hex("release-jar"))
+
+	code, res, stderr := runBuildCmd(t, d, "-maven", "com.acme:web:1.0.0", "-settings", settings)
+	if code != exitOK {
+		t.Fatalf("exit %d, stderr %s, res %+v", code, stderr, res)
+	}
+	if res.Version != "1.0.0" || res.Source != "maven:com.acme:web:1.0.0:jar" || res.Cached {
+		t.Errorf("result %+v", res)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "app.jar")); string(got) != "release-jar" {
+		t.Errorf("artifact = %q", got)
+	}
+}
+
+func TestBuildFromMavenSnapshotReportsResolvedVersion(t *testing.T) {
+	repo := maventest.New(t, "dev", "token")
+	want := repo.PutSnapshot("com.acme", "web", "2.0-SNAPSHOT", "20261017.083000", "3", []byte("snap"))
+	d, _, _ := buildDeps(t)
+	_, res, _ := runBuildCmd(t, d, "-maven", "com.acme:web:2.0-SNAPSHOT", "-settings", repo.SettingsXML(t, t.TempDir()))
+	if res.Version != want {
+		t.Errorf("version %q, want %q", res.Version, want)
+	}
+}
+
+func TestBuildFromWorkdir(t *testing.T) {
+	proj := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(proj, ".cagent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	desc := "name: web\nstack: java-springboot\nsources:\n  workdir:\n" +
+		"    build: 'mkdir -p target && printf release-jar > target/web.jar'\n    output: 'target/*.jar'\n"
+	if err := os.WriteFile(filepath.Join(proj, ".cagent", "service.yaml"), []byte(desc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, f, dir := buildDeps(t)
+	expectBuild(f, dir, sha256Hex("release-jar"))
+	code, res, stderr := runBuildCmd(t, d, "-workdir", proj)
+	if code != exitOK || res.Source != "workdir:"+proj {
+		t.Fatalf("exit %d, stderr %s, res %+v", code, stderr, res)
+	}
+}
+
+func TestBuildFromWorkdirFailureReportsLog(t *testing.T) {
+	proj := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(proj, ".cagent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	desc := "name: web\nsources:\n  workdir:\n    build: 'echo token=abc; echo COMPILATION ERROR; exit 1'\n    output: 'target/*.jar'\n"
+	if err := os.WriteFile(filepath.Join(proj, ".cagent", "service.yaml"), []byte(desc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, f, _ := buildDeps(t)
+	code, res, _ := runBuildCmd(t, d, "-workdir", proj)
+	if code != exitFindings || len(res.Log) != 2 || res.Log[0] != "token=******" || res.Log[1] != "COMPILATION ERROR" {
+		t.Fatalf("exit %d, res %+v", code, res)
+	}
+	if len(f.Calls) != 0 {
+		t.Errorf("docker called after a failed build: %v", f.Calls)
+	}
+}
+
+func TestBuildArgumentErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"build", "-name", "demo", "-service", "web", "-tag", webTag},
+		{"build", "-name", "demo", "-service", "web", "-tag", webTag, "-maven", "a:b:1", "-workdir", "."},
+		{"build", "-name", "demo", "-service", "web", "-tag", "nginx:latest", "-maven", "a:b:1"},
+		{"build", "-name", "demo", "-service", "../x", "-tag", webTag, "-maven", "a:b:1"},
+	} {
+		var out, errOut bytes.Buffer
+		if code := run(args, &out, &errOut, testDeps(t)); code != exitError {
+			t.Errorf("%v: exit %d, want %d", args, code, exitError)
+		}
+	}
+}
