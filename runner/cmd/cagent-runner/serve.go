@@ -68,8 +68,9 @@ type ToolResult struct {
 type serveConfig struct {
 	hub          string
 	token        string
-	workdirRoots []string // resolved; build may only use working directories inside these
-	settings     string   // Maven settings.xml; the platform cannot choose another
+	workdirRoots []string        // resolved; build may only use working directories inside these
+	settings     string          // Maven settings.xml; the platform cannot choose another
+	allowRules   map[string]bool // rule IDs the platform may approve over RPC; empty means none
 	backoff      time.Duration
 	backoffMax   time.Duration
 	pingEvery    time.Duration
@@ -87,8 +88,9 @@ func runServe(args []string, stdout, stderr io.Writer, d deps) int {
 	hub := fs.String("hub", "", "hub URL, ws:// or wss://")
 	tokenEnv := fs.String("token-env", "CAGENT_TOKEN", "environment variable holding the runner token")
 	settings := fs.String("maven-settings", "", "Maven settings.xml for build (default ~/.m2/settings.xml)")
-	var roots stringList
+	var roots, rules stringList
 	fs.Var(&roots, "workdir-root", "directory under which build may use working directories; repeatable")
+	fs.Var(&rules, "allow-rule", "lint rule ID the platform may approve over RPC, e.g. privileged or field:sysctls; repeatable, default none")
 	if err := fs.Parse(args); err != nil {
 		return exitError
 	}
@@ -104,6 +106,12 @@ func runServe(args []string, stdout, stderr io.Writer, d deps) int {
 	}
 	cfg := serveConfig{hub: *hub, token: token, settings: *settings,
 		backoff: time.Second, backoffMax: 30 * time.Second, pingEvery: 30 * time.Second}
+	cfg.allowRules = map[string]bool{}
+	for _, r := range rules {
+		if r = strings.TrimSpace(r); r != "" {
+			cfg.allowRules[r] = true
+		}
+	}
 	for _, r := range roots {
 		rr, err := guard.Resolve(r)
 		if err != nil {
@@ -278,7 +286,7 @@ func writeInput(d deps, cluster, file string, data []byte) (string, error) {
 }
 
 func composeTool(cmd string) tool {
-	return func(_ serveConfig, d deps, params json.RawMessage) ([]string, error) {
+	return func(cfg serveConfig, d deps, params json.RawMessage) ([]string, error) {
 		var p struct {
 			Name    string   `json:"name"`
 			Compose string   `json:"compose"`
@@ -293,17 +301,40 @@ func composeTool(cmd string) tool {
 		if p.Compose == "" {
 			return nil, errors.New("compose is required")
 		}
-		for _, a := range p.Allow {
-			if strings.Contains(a, ",") {
-				return nil, fmt.Errorf("allow entry %q contains a comma", a)
-			}
+		allow, err := checkApprovals(cfg, p.Allow)
+		if err != nil {
+			return nil, err
 		}
 		path, err := writeInput(d, p.Name, "candidate.yaml", []byte(p.Compose))
 		if err != nil {
 			return nil, err
 		}
-		return []string{cmd, "-name", p.Name, "-f", path, "-allow", strings.Join(p.Allow, ",")}, nil
+		return []string{cmd, "-name", p.Name, "-f", path, "-allow", strings.Join(allow, ",")}, nil
 	}
+}
+
+// checkApprovals returns the approvals the platform may pass on, each as "service:rule".
+// The platform relays what the user approved in the web UI, but a compromised platform or a
+// leaked token could claim any approval, so over RPC only rules the user listed on this
+// machine with -allow-rule take effect. By default none do. An entry splits at its first
+// colon: rule IDs such as "field:sysctls" contain colons, services do not.
+func checkApprovals(cfg serveConfig, entries []string) ([]string, error) {
+	approved := make([]string, 0, len(entries))
+	for _, raw := range entries {
+		a := strings.TrimSpace(raw) // the subcommand trims too; check what it will see
+		if strings.Contains(a, ",") {
+			return nil, fmt.Errorf("allow entry %q contains a comma", raw)
+		}
+		service, rule, ok := strings.Cut(a, ":")
+		if !ok || service == "" || rule == "" {
+			return nil, fmt.Errorf("allow entry %q is not service:rule", raw)
+		}
+		if !cfg.allowRules[rule] {
+			return nil, fmt.Errorf("allow %q: rule %q is not in this Runner's -allow-rule list", a, rule)
+		}
+		approved = append(approved, a)
+	}
+	return approved, nil
 }
 
 func nameTool(cmd string) tool {

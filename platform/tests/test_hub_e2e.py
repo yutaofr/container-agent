@@ -32,7 +32,14 @@ async def test_runner_answers_over_the_hub_and_survives_a_restart(tmp_path, cata
     server = await start(hub, "127.0.0.1", port)
     env = {**os.environ, "CAGENT_TOKEN": TOKEN, "CAGENT_HOME": str(tmp_path / "home")}
     runner = subprocess.Popen(
-        [os.environ["CAGENT_RUNNER"], "serve", "-hub", f"ws://127.0.0.1:{port}/runner"],
+        [
+            os.environ["CAGENT_RUNNER"],
+            "serve",
+            "-hub",
+            f"ws://127.0.0.1:{port}/runner",
+            "-allow-rule",
+            "privileged",
+        ],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -50,6 +57,16 @@ async def test_runner_answers_over_the_hub_and_survives_a_restart(tmp_path, cata
         risky = "services:\n  web: { image: nginx:1.27, privileged: true }\n"
         bad = await hub.call("e2e", "validate", {"name": "risky", "compose": risky})
         assert bad.exit_code == 1 and bad.output["findings"][0]["rule"] == "privileged"
+
+        # The platform may approve only rules listed with -allow-rule on the Runner's machine.
+        approved = await hub.call(
+            "e2e", "validate", {"name": "risky", "compose": risky, "allow": ["web:privileged"]}
+        )
+        assert approved.ok and approved.output["findings"] == []
+        with pytest.raises(RunnerError, match="-allow-rule"):
+            await hub.call(
+                "e2e", "validate", {"name": "risky", "compose": risky, "allow": ["web:docker-sock"]}
+            )
 
         snap = await hub.call("e2e", "snapshot", {"name": "e2e-none"})
         assert snap.ok and snap.output["services"] == []

@@ -38,7 +38,7 @@ const usage = `usage:
   cagent-runner snapshot -name N
   cagent-runner verify   -name N [-probes probes.json]
   cagent-runner down     -name N
-  cagent-runner serve    -hub ws://HOST/runner [-token-env CAGENT_TOKEN] [-workdir-root DIR]... [-maven-settings F]
+  cagent-runner serve    -hub ws://HOST/runner [-token-env CAGENT_TOKEN] [-workdir-root DIR]... [-allow-rule RULE]... [-maven-settings F]
   cagent-runner build    -name N -service S -tag cagent/S:REF (-maven G:A:V[:EXT] [-settings F] | -workdir DIR) [-stack S] [-jdk V]`
 
 // Report is the JSON that validate prints, and that up prints when it refuses to start.

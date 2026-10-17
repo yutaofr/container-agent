@@ -217,3 +217,105 @@ func TestServeNeedsHubAndToken(t *testing.T) {
 		}
 	}
 }
+
+func allowRules(rules ...string) func(*serveConfig) {
+	return func(c *serveConfig) {
+		c.allowRules = map[string]bool{}
+		for _, r := range rules {
+			c.allowRules[r] = true
+		}
+	}
+}
+
+const (
+	privilegedCompose = "services:\n  web: { image: nginx:1.27, privileged: true }\n"
+	sysctlsCompose    = "services:\n  web: { image: nginx:1.27, sysctls: { net.core.somaxconn: \"1024\" } }\n"
+)
+
+// The platform may approve only the exceptions the user listed on this machine with
+// -allow-rule; by default that is none.
+func TestServeRefusesApprovalsOutsideTheLocalAllowList(t *testing.T) {
+	c, _ := startServe(t, testDeps(t), nil)
+	resp := call(t, c, 1, "validate", map[string]any{
+		"name": "demo", "compose": privilegedCompose, "allow": []string{"web:privileged"},
+	})
+	if resp.Error == nil || resp.Error.Code != rpcInvalidParams {
+		t.Fatalf("got %+v, want invalid params", resp)
+	}
+	if want := `rule "privileged" is not in this Runner's -allow-rule list`; !strings.Contains(resp.Error.Message, want) {
+		t.Errorf("message %q does not contain %q", resp.Error.Message, want)
+	}
+}
+
+func TestServeAppliesApprovalsTheUserListed(t *testing.T) {
+	c, _ := startServe(t, testDeps(t), allowRules("privileged"))
+	resp := call(t, c, 1, "validate", map[string]any{
+		"name": "demo", "compose": privilegedCompose, "allow": []string{"web:privileged"},
+	})
+	if resp.Error != nil || resp.Result == nil || resp.Result.ExitCode != exitOK {
+		t.Fatalf("got %+v, want exit 0", resp)
+	}
+	// Listing one rule does not open others.
+	resp = call(t, c, 2, "validate", map[string]any{
+		"name": "demo", "compose": privilegedCompose, "allow": []string{"web:docker-sock"},
+	})
+	if resp.Error == nil || resp.Error.Code != rpcInvalidParams {
+		t.Errorf("unlisted rule: got %+v, want invalid params", resp)
+	}
+}
+
+func TestServeFieldApprovalsNeedTheFieldRuleListed(t *testing.T) {
+	params := map[string]any{"name": "demo", "compose": sysctlsCompose, "allow": []string{"web:field:sysctls"}}
+
+	c, _ := startServe(t, testDeps(t), allowRules("privileged"))
+	if resp := call(t, c, 1, "validate", params); resp.Error == nil || resp.Error.Code != rpcInvalidParams {
+		t.Errorf("field rule not listed: got %+v, want invalid params", resp)
+	}
+
+	c, _ = startServe(t, testDeps(t), allowRules("field:sysctls"))
+	if resp := call(t, c, 1, "validate", params); resp.Error != nil || resp.Result.ExitCode != exitOK {
+		t.Errorf("field rule listed: got %+v, want exit 0", resp)
+	}
+
+	// A top-level key is approved as "*:field:KEY" and its rule is "field:KEY".
+	c, _ = startServe(t, testDeps(t), allowRules("field:configs"))
+	top := map[string]any{"name": "demo", "compose": sysctlsCompose, "allow": []string{"*:field:configs"}}
+	if resp := call(t, c, 1, "validate", top); resp.Error != nil {
+		t.Errorf("top-level field rule: got %+v, want no error", resp)
+	}
+}
+
+func TestServeRejectsMalformedApprovals(t *testing.T) {
+	c, _ := startServe(t, testDeps(t), allowRules("privileged", ""))
+	for i, entry := range []string{"privileged", ":privileged", "web:", "  ", "web:privileged,web:docker-sock"} {
+		resp := call(t, c, i+1, "validate", map[string]any{
+			"name": "demo", "compose": privilegedCompose, "allow": []string{entry},
+		})
+		if resp.Error == nil || resp.Error.Code != rpcInvalidParams {
+			t.Errorf("allow %q: got %+v, want invalid params", entry, resp)
+		}
+	}
+}
+
+func TestServeNormalizesApprovalsBeforeChecking(t *testing.T) {
+	// The CLI trims spaces around each entry, so the check must see the trimmed rule.
+	c, _ := startServe(t, testDeps(t), allowRules("privileged"))
+	resp := call(t, c, 1, "validate", map[string]any{
+		"name": "demo", "compose": privilegedCompose, "allow": []string{" web:privileged "},
+	})
+	if resp.Error != nil || resp.Result.ExitCode != exitOK {
+		t.Errorf("got %+v, want exit 0", resp)
+	}
+}
+
+func TestServeAllowRuleFlagIsRepeatable(t *testing.T) {
+	var l stringList
+	for _, v := range []string{"privileged", "field:sysctls"} {
+		if err := l.Set(v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(l) != 2 {
+		t.Fatalf("got %v", l)
+	}
+}
