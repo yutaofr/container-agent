@@ -1397,9 +1397,45 @@ Pushing a workflow file needs a GitHub credential with the `workflow` scope. If 
 
 ---
 
+### Task 11: Security hardening
+
+Added after Task 10 in response to automated security review of Tasks 2 and 4. Each step was test-first, in separate commits. The `validate` report shape did not change, so the CLI tests are unchanged.
+
+**Files:**
+- Modify: `runner/internal/guard/guard.go`, `runner/internal/guard/guard_test.go`
+- Modify: `runner/internal/compose/lint.go`, `runner/internal/compose/lint_test.go`
+- Create: `runner/internal/compose/lint_rules_test.go`
+- Modify: `docs/plans/2026-10-17-container-agent-design.md` (section 8 only)
+
+**What was done:**
+
+1. **Dangling symlinks in the guard** (`b328e82`, during the first batch). A symlink inside the workspace whose target did not exist made `EvalSymlinks` fail with `ErrNotExist`, and the parent-directory fallback then reported the path as inside the workspace. A symlink as the final element is now refused with `ErrOutside`.
+2. **`guard.Resolve`** (`3a220d6`). The resolution logic is exported so lint reuses it. It walks up to the nearest existing ancestor, so a not-yet-created nested path in the workspace resolves, and it refuses a dangling symlink anywhere on the path.
+3. **Symlink-safe bind checks** (`5ff2fd1`). `Lint` resolves each bind source and each allowed root before comparing. A source that cannot be resolved is reported as `host-mount` (fail closed). `docker-sock` now also fires when the resolved source is a socket or a directory containing one, such as `/var/run` or `/run`. `Finding.Detail` keeps the path as declared. The socket paths live in the package variable `dockerSocketPaths` so tests can substitute paths that exist on every machine.
+4. **Extended rule set** (`9c993eb`). Seven new rule IDs, approvable as `service:rule`:
+
+   | Rule ID | Catches |
+   | --- | --- |
+   | `pid-host` | `pid: host` |
+   | `ipc-host` | `ipc: host` |
+   | `userns-host` | `userns_mode: host` |
+   | `devices` | any `devices` entry |
+   | `security-opt` | `seccomp` or `apparmor` unconfined, `label=disable` / `label:disable`, `no-new-privileges:false` |
+   | `cgroup-parent` | any `cgroup_parent` |
+   | `volume-driver` | a top-level volume with a non-`local` driver |
+
+   Top-level local volumes whose `driver_opts` make `device` a bind-mounted host path (`o` contains `bind` or `rbind`, or `type` is `none` or `bind`) get the `host-mount` and `docker-sock` checks. External volumes are not inspected. For findings on a top-level volume the `service` field holds the volume name, so approvals read `data:volume-driver`. Output order: per service in name order (`privileged`, `host-network`, `pid-host`, `ipc-host`, `userns-host`, `cap-add`, `devices`, `security-opt`, `cgroup-parent`, then volume mounts), then top-level volumes in name order.
+5. **Design doc** (`3982ae4`). Section 8 now has a table of every rule ID, the mount-source check flow, and the statement that sources are checked after symlink resolution and fail closed.
+
+**Verification:** `make runner-test` passes in the `golang:1.24` container. `cagent-runner validate` exits 1 on the risky sample and on a file using the new rules, and 0 on a clean file.
+
+**Known gaps, not covered:** `security_opt: systempaths=unconfined`, `pid` / `ipc` modes other than `host` (for example `container:<id>`), and the TOCTOU window between the lint check and `docker compose up`.
+
+---
+
 ## Milestone 1 done when
 
 - [ ] `make runner-test` passes locally
 - [ ] The `runner` workflow is green on GitHub
 - [ ] `cagent-runner validate` exits 1 on the risky sample and 0 on a clean file
-- [ ] All ten tasks committed on `m1-runner-core`; branch ready for review via superpowers:requesting-code-review
+- [ ] All eleven tasks committed on `m1-runner-core`; branch ready for review via superpowers:requesting-code-review
