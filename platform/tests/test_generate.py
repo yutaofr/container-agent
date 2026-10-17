@@ -2,10 +2,11 @@ import os
 
 import pytest
 
+from cagent.catalog import load_catalog
 from cagent.generate import GenerationError, generate, image_tag, to_yaml
 from cagent.spec import Source
 
-from .conftest import FIXTURES, spec_with
+from .conftest import FIXTURES, REPO_CATALOG, spec_with
 
 GOLDEN = FIXTURES / "orders-poc.compose.yaml"
 
@@ -73,3 +74,16 @@ def test_image_tag(kind, ref, want):
         assert got.startswith("cagent/svc:workdir-") and len(got) == len(want)
     else:
         assert got == want
+
+
+def test_template_command_is_emitted():
+    catalog = load_catalog(REPO_CATALOG, FIXTURES / "e2e-catalog")
+    spec = spec_with(services=[], middleware=[{"template": "memhog"}])
+    memhog = generate(spec, catalog)["services"]["memhog"]
+    assert memhog["command"][:2] == ["sh", "-c"] and "httpd" in memhog["command"][2]
+    assert (
+        "command"
+        not in generate(spec_with(services=[], middleware=[{"template": "redis"}]), catalog)[
+            "services"
+        ]["redis"]
+    )
