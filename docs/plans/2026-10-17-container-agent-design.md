@@ -7,6 +7,17 @@
 
 Give developers, testers, and architects an AI agent that builds a docker compose cluster on the user's machine for a stated purpose, fixes it automatically, and stops only when the cluster is fully healthy.
 
+```mermaid
+flowchart LR
+  A["User states purpose<br/>and services"] --> B["Agent asks about gaps,<br/>proposing defaults"]
+  B --> C["User approves<br/>compose YAML"]
+  C --> D["Agent builds<br/>and starts cluster"]
+  D --> E{"Fully healthy?"}
+  E -->|no| F["Agent diagnoses and<br/>fixes the environment"]
+  F --> D
+  E -->|yes| G["Hand over,<br/>then watch"]
+```
+
 Constraints:
 
 - The agent asks about any compose element the user leaves unspecified and proposes a default for each.
@@ -37,18 +48,47 @@ Constraints:
 
 ## 3. Architecture
 
-```
-┌──────────────────── Internal platform ─────────────────────┐        ┌──────── User machine ────────┐
-│ Web UI ──► Orchestrator (Python + LangGraph)                │        │ Runner (single Go binary)      │
-│ chat/      │  one run per cluster,                          │  WSS   │  ├ whitelisted tool executor   │
-│ approval/  │  state in Postgres                             │◄──────►│  ├ compose-go validation       │
-│ status/logs├─► Model Gateway (LiteLLM)                      │ Runner │  ├ artifact fetch (local creds)│
-│            │     ├ Bedrock                                  │ dials  │  ├ image builds (builder tpls) │
-│            │     └ vLLM/Ollama open-source models           │  out   │  ├ watch rule engine           │
-│            ├─► Catalog Service                              │        │  └ Docker Engine               │
-│            │     descriptors / middleware templates / recipes│       └────────────────────────────────┘
-│            └─► Runner Hub (connections + tool RPC)          │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+  subgraph PLATFORM["Internal platform · Python"]
+    UI["Web UI<br/>chat · approval · status · logs"]
+    ORC["Orchestrator<br/>LangGraph state machine"]
+    PG[("Postgres<br/>checkpoints · audit")]
+    GW["Model Gateway<br/>LiteLLM"]
+    CAT["Catalog Service<br/>descriptors · templates · recipes"]
+    HUB["Runner Hub<br/>connections · tool RPC"]
+    UI <--> ORC
+    ORC --- PG
+    ORC --> GW
+    ORC --> CAT
+    ORC <--> HUB
+  end
+
+  subgraph MODELS["Models"]
+    BR["AWS Bedrock"]
+    OSS["vLLM / Ollama"]
+  end
+
+  subgraph LOCAL["User machine"]
+    RUN["Runner · single Go binary<br/>tool whitelist · compose-go<br/>builders · watch rules · redaction"]
+    DOCK["Docker Engine"]
+    CREDS[/"Local credentials<br/>~/.m2 · .npmrc · CI token"/]
+    WD[/"Working dirs, read-only"/]
+    CREDS -.-> RUN
+    WD -.-> RUN
+    RUN --> DOCK
+  end
+
+  subgraph ARTIFACTS["Artifact sources"]
+    NX["Nexus / Artifactory"]
+    CIS["Jenkins / GitLab CI"]
+  end
+
+  GW --> BR
+  GW --> OSS
+  RUN ==>|"WSS · outbound only"| HUB
+  RUN --> NX
+  RUN --> CIS
 ```
 
 ### 3.1 Platform (Python)
@@ -68,31 +108,103 @@ Constraints:
 
 ### 3.3 POC vs. production
 
-The Orchestrator talks only to LiteLLM. Moving from POC to production changes gateway configuration, not code.
+The Orchestrator talks only to LiteLLM and references tiers, not models. Moving from POC to production changes gateway configuration, not code.
 
-- **POC**: the platform, the Runner, and LiteLLM run together on one dev machine via compose. The `small` tier points at local Ollama; the `large` tier points at Bedrock.
-- **Production**: the platform runs on internal infrastructure. LiteLLM points at vLLM on the internal GPU cluster and at Bedrock. Runners connect to the remote platform.
+```mermaid
+flowchart LR
+  ORC["Orchestrator<br/>references tiers only"] --> GW["LiteLLM gateway"]
+  GW -->|POC| P1["small → Ollama on the dev machine"]
+  GW -->|POC| P2["large → Bedrock"]
+  GW -->|Production| R1["small / medium → vLLM on internal GPUs"]
+  GW -->|Production| R2["large → Bedrock"]
+```
+
+- **POC**: the platform, the Runner, and LiteLLM run together on one dev machine via compose.
+- **Production**: the platform runs on internal infrastructure, and Runners connect to it remotely.
 
 ## 4. Workflow State Machine
 
 Every phase revolves around a **ClusterSpec**, a structured statement of cluster intent. Conversation fills in the ClusterSpec; the compose YAML is generated from it.
+
+```mermaid
+stateDiagram-v2
+  direction TB
+  state "Clarify" as Clarify
+  state "Generate" as Generate
+  state "Pre-check" as PreCheck
+  state "Approve (human)" as Approve
+  state "Prepare" as Prepare
+  state "Start" as Start
+  state "Verify L1–L4" as Verify
+  state "Diagnose & fix" as Fix
+  state "Escalate to human" as Escalate
+  state "Hand over" as HandOver
+  state "Watch" as Watch
+
+  [*] --> Clarify
+  Clarify --> Generate: ClusterSpec complete
+  Generate --> PreCheck
+  PreCheck --> Generate: validation failed
+  PreCheck --> Approve
+  Approve --> Generate: rejected with comments
+  Approve --> Prepare: approved
+  Prepare --> Start
+  Start --> Verify
+  Verify --> HandOver: all layers pass and stable
+  Prepare --> Fix: fetch or build failed
+  Start --> Fix: start failed
+  Verify --> Fix: check failed
+  Fix --> Prepare: image or Dockerfile changed
+  Fix --> Start: compose or config changed
+  Fix --> Approve: patch outside whitelist
+  Fix --> Escalate: budget spent, oscillation, or source issue
+  Escalate --> Fix: user adds a hint
+  HandOver --> Watch
+  Watch --> Fix: user re-enters healing
+  Watch --> [*]: cluster destroyed
+```
 
 | # | Phase | Work | Performed by |
 |---|---|---|---|
 | 1 | Clarify | Extract the purpose and the service list; tag each service with its source (`release:1.4.2`, `snapshot:2.0-SNAPSHOT`, `workdir:/path`, `ci:job#123`). Ask about each missing required field from the descriptors, one at a time, each with a default | LLM (large) + descriptors |
 | 2 | Generate | ClusterSpec → compose YAML, Dockerfiles, build plan. Registered services use templates; the LLM fills in unregistered ones after inspecting them | Templates first, LLM for gaps |
 | 3 | Pre-check | compose-go validation; check port conflicts, image architecture, free local resources, security rules | Rules |
-| 4 | Approve | Show YAML, Dockerfiles, and build plan. The user approves, edits, or rejects with comments (back to step 2) | Human |
+| 4 | Approve | Show YAML, Dockerfiles, and build plan. The user approves, edits, or rejects with comments | Human |
 | 5 | Prepare | Fetch artifacts and build images | Runner |
 | 6 | Start | `docker compose up -d` | Runner |
 | 7 | Verify | L1 containers running → L2 healthchecks → L3 smoke probes → L4 user-defined checks → stability window (default: no restarts for 2 minutes) | Rules + probes |
-| 8 | Diagnose & fix | Entered on any failure. Rules first, then the LLM. After a fix, return to step 5 or 6 depending on what changed | Rules → LLM |
+| 8 | Diagnose & fix | Entered on any failure. Rules first, then the LLM | Rules → LLM |
 | 9 | Hand over | Output endpoints, credentials, tuning log. Optionally save a recipe or write the fixed configuration back to the descriptor | Templates |
 | 10 | Watch | Rule-based monitoring; on anomalies, notify the user, who decides whether to re-enter self-healing | Runner rules |
 
-Automatic fixes return to step 5 or 6, never to approval. A change outside the environment-only whitelist triggers a new approval.
+Automatic fixes return to Prepare or Start, never to Approve — unless a patch falls outside the environment-only whitelist.
 
 ## 5. Self-Healing Loop
+
+```mermaid
+flowchart TD
+  FAIL["Failure detected"] --> SIG["Runner collects signals<br/>state · exit code · events<br/>filtered logs · probes · resources"]
+  SIG --> RED["Runner redacts snapshot"]
+  RED --> FP["Fingerprint error<br/>e.g. jdbc:connection_refused@mysql"]
+  FP --> TOPO{"Upstream service<br/>unhealthy?"}
+  TOPO -->|yes| UP["Retarget to upstream;<br/>treat this error as a symptom"]
+  UP --> T0
+  TOPO -->|no| T0{"T0 rule<br/>matches?"}
+  T0 -->|yes| PATCH["Structured patch"]
+  T0 -->|no| SCORE["Score complexity"]
+  SCORE --> LLM["T1 small model<br/>or T2 large model"]
+  LLM --> PATCH
+  PATCH --> WL{"Whitelist check"}
+  WL -->|touches source| SRC["Stop: source-code diagnosis"]
+  WL -->|outside env whitelist| APR["New approval"]
+  WL -->|ok| BUD{"Budget left?<br/>Patch hash new?<br/>Not a revert?"}
+  BUD -->|no| ESC["Escalate to human"]
+  BUD -->|yes| APPLY["Apply, log diff,<br/>rebuild or restart"]
+  APPLY --> GONE{"Signature gone?"}
+  GONE -->|yes| VER["Back to Verify"]
+  GONE -->|no| RAISE["Raise one model tier"]
+  RAISE --> SCORE
+```
 
 ### 5.1 Collect signals
 
@@ -128,7 +240,15 @@ The web UI shows the suspected root cause, log evidence, every attempted fix wit
 
 ### 5.7 Learn from fixes
 
-Record every successful "signature → patch" pair. When the same patch fixes the same signature N times across different clusters, propose it as a T0 rule; a human reviews it before it goes live.
+```mermaid
+flowchart LR
+  OK["Successful fix<br/>signature → patch"] --> HIST[("Fix history")]
+  HIST --> CHK{"Same patch fixed the same<br/>signature N times across clusters?"}
+  CHK -->|yes| CAND["Candidate T0 rule"]
+  CAND --> REV["Human review"]
+  REV --> LIVE["Live T0 rule"]
+  CHK -->|no| HIST
+```
 
 ## 6. Service Descriptors and Builds
 
@@ -159,9 +279,42 @@ probes:                          # L3 smoke probes
   - http: { path: "/api/orders/ping", expect: 200 }
 ```
 
-Middleware templates use the same format (`kind: middleware`). The platform maintains them; each declares `provides`, supported versions, default configuration, healthchecks, and resource presets (`tiny` / `standard`). The generator matches `requires` against `provides` and renders connection parameters into environment variables. If TiDB declares `provides: mysql`, the same application runs against MySQL 8.0 or TiDB unchanged.
+Middleware templates use the same format (`kind: middleware`). The platform maintains them; each declares `provides`, supported versions, default configuration, healthchecks, and resource presets (`tiny` / `standard`). The generator matches `requires` against `provides` and renders connection parameters into environment variables:
+
+```mermaid
+flowchart LR
+  APP["order-service<br/>requires: mysql ≥ 8.0, kafka"]
+  MY["mysql 8.0 template<br/>provides: mysql"]
+  TI["tidb template<br/>provides: mysql"]
+  KF["kafka template<br/>provides: kafka"]
+  APP -.->|"mysql · pick one"| MY
+  APP -.->|"mysql · pick one"| TI
+  APP -.->|kafka| KF
+  MY --> ENV["Rendered into app env<br/>SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/app"]
+```
+
+Swapping MySQL for TiDB changes the middleware, not the application.
 
 ### 6.2 From source to image
+
+```mermaid
+flowchart LR
+  subgraph SOURCES["Service sources"]
+    REL["release"]
+    SNAP["snapshot"]
+    CIA["ci"]
+    WDIR["workdir"]
+  end
+  REL -->|"Nexus, local creds"| ART
+  SNAP -->|"resolve timestamped version"| ART
+  CIA -->|"CI API, user token"| ART
+  WDIR -->|"run build cmd, read output"| ART
+  ART["Local artifact + sha256"] --> CACHE{"Tag exists?<br/>cagent/svc:source-sha12"}
+  CACHE -->|yes| IMG["Image ready"]
+  CACHE -->|no| TPL["Builder template by stack<br/>java-springboot → temurin JRE + jar"]
+  TPL --> BUILD["docker build"]
+  BUILD --> IMG
+```
 
 | Source | Runner action |
 |---|---|
@@ -169,13 +322,27 @@ Middleware templates use the same format (`kind: middleware`). The platform main
 | ci | Download the artifact through the Jenkins / GitLab API with the user's CI token |
 | workdir | Run the `build` command locally and read the `output` artifact. The working directory is read-only |
 
-The Runner then applies the builder template for the stack (Java: `eclipse-temurin:<jdk>-jre` plus the jar), generates a Dockerfile, and builds the image.
-
 - **Image cache**: tag images `cagent/<svc>:<source>-<first 12 chars of artifact sha256>`; skip the build when the artifact is unchanged.
 - **Single-service rebuild**: after a code change in a working directory, replace just that service's container in one step.
 - **Unregistered projects**: the agent reads pom, gradle, package.json, go.mod, and any existing Dockerfile to draft a descriptor. Once the cluster works, the user can submit the draft to the project repository as a PR.
 
 ## 7. Model Routing
+
+```mermaid
+flowchart LR
+  NODE["LLM node<br/>e.g. fix_single_service"] --> PIN{"User pinned a<br/>tier or model?"}
+  PIN -->|"yes · cluster > user > team > platform"| TIER["Starting tier"]
+  PIN -->|no| SCORE["Rule-based complexity score<br/>services · known signature<br/>unregistered count · prior failures"]
+  SCORE --> TIER
+  TIER --> CAP{"Model has the<br/>required capability tags?"}
+  CAP -->|no| REJ["Reject with explanation"]
+  CAP -->|yes| CALL["Call via LiteLLM"]
+  CALL --> VAL{"Schema valid and<br/>fix effective?"}
+  VAL -->|yes| DONE["Use result"]
+  VAL -->|"no · first failure"| CALL
+  VAL -->|"no · again"| RAISE["Raise one tier"]
+  RAISE --> CAP
+```
 
 ### 7.1 Three-level mapping
 
@@ -197,7 +364,7 @@ Node code references tier names, never model names.
 
 ### 7.2 Automatic selection
 
-Rules score complexity; the LLM never rates itself. Inputs: services involved, whether the signature is known, number of unregistered services, prior failures. The score sets the starting tier; a failed fix or a schema-invalid output moves the node up one tier. Pydantic schemas validate every LLM output: retry once on failure, then escalate.
+Rules score complexity; the LLM never rates itself. The score sets the starting tier; a failed fix or a schema-invalid output moves the node up one tier. Pydantic schemas validate every LLM output: retry once on failure, then escalate.
 
 ### 7.3 Capability tags
 
@@ -209,6 +376,34 @@ Override order: platform default < team < user < this cluster. The web UI offers
 
 ## 8. Security
 
+The sequence below shows one approved tool call and where each trust boundary sits.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor U as User
+  participant W as Web UI
+  participant O as Orchestrator
+  participant H as Runner Hub
+  participant R as Runner
+  participant D as Docker
+  participant M as LiteLLM
+  R->>H: Dial out over WSS with user and device token
+  U->>W: Approve compose YAML
+  W->>O: Resume run from interrupt
+  O->>H: Tool call compose_up
+  H->>R: RPC compose_up
+  R->>R: Check args against whitelist and cagent.managed label
+  R->>D: docker compose up -d
+  D-->>R: Status, events, logs
+  R->>R: Filter logs and redact snapshot
+  R-->>H: Redacted diagnostic snapshot
+  H-->>O: Snapshot
+  O->>M: Diagnose using redacted snapshot only
+  M-->>O: Structured patch
+  Note over R,D: Credentials and raw logs never leave the user machine
+```
+
 - **Runner authentication**: the user signs in to the web UI via SSO and registers the device, receiving a revocable token bound to user and device. Connections use WSS.
 - **Tool argument checks**: file access stays inside `~/.cagent/`; declared working directories are read-only. Docker operations touch only compose projects labelled `cagent.managed=true`.
 - **Compose security lint**: reject `privileged`, `docker.sock` mounts, `network_mode: host`, host mounts outside the workspace, and `cap_add` by default. The user can allow each one individually during approval.
@@ -217,6 +412,14 @@ Override order: platform default < team < user < this cluster. The web UI offers
 
 ## 9. Testing Strategy
 
+```mermaid
+flowchart LR
+  LIB[("Fault-scenario library")] --> RUNALL["Run every scenario<br/>on every tier"]
+  RUNALL --> MET["Fix rate · rounds · cost"]
+  MET --> ROUTE["Tune default routing table"]
+  NEW["New real-world failure"] --> LIB
+```
+
 | Layer | Scope | Method |
 |---|---|---|
 | Unit | Runner: compose-go validation, whitelist, redaction, fingerprinting. Platform: ClusterSpec → compose generation, complexity scoring, budgets and oscillation detection | Go table-driven tests; golden files for generators |
@@ -224,31 +427,34 @@ Override order: platform default < team < user < this cluster. The web UI offers
 | Fault-scenario library | Prebuilt broken clusters: port conflict, OOM, missing env var, MySQL not ready, misconfigured Kafka listeners, architecture mismatch, config typos, and more. Each scenario records its root-cause category and maximum rounds | Run every scenario on every tier; track fix rate, rounds, and cost; tune default routing from the results |
 | End-to-end | The agent deploys its own platform, plus 2–3 real company projects | Nightly |
 
-Every new real-world failure becomes a fault scenario.
-
 ## 10. POC Scope
 
-**In scope:**
+```mermaid
+mindmap
+  root((POC))
+    In scope
+      Single machine via compose
+      Ollama plus Bedrock
+      Web chat, diff approval, status, logs
+      State machine steps 1 to 9
+      Budgets, oscillation detection, escalation
+      MySQL, Redis, Kafka templates
+      Java Spring Boot builder
+      Nexus release and snapshot, workdir
+      About 10 T0 rules plus T1 and T2 fixes
+      Acceptance L1 to L4
+    Out of scope
+      CI artifact source
+      Recipe sharing
+      Git webhook descriptor collection
+      Descriptor write-back PRs
+      External watch notifications
+      Team-level overrides
+      SSO, static token instead
+      Rule mining from fix history
+```
 
-- Single machine: platform and Runner on one host via compose; models from Ollama and Bedrock
-- Web: chat, YAML diff approval, status panel, logs
-- Full state machine (steps 1–9), including budgets, oscillation detection, and human escalation
-- Middleware templates: MySQL, Redis, Kafka
-- Builder: Java Spring Boot
-- Sources: Nexus release / snapshot, local working directory
-- About 10 T0 rules, plus T1 / T2 LLM fixes
-- Acceptance L1–L4
-
-**Out of scope:**
-
-- CI artifact source
-- Recipe sharing
-- Collecting descriptors via Git webhooks (the POC reads a local catalog directory)
-- Writing descriptors back as PRs
-- External notifications during watch
-- Team-level overrides
-- SSO (the POC uses a static token)
-- Mining rules from fix history
+The POC reads descriptors from a local catalog directory instead of collecting them via Git webhooks.
 
 **Success criteria:**
 
