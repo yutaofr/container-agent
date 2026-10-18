@@ -1,0 +1,17 @@
+# Model tiers for the POC, cheapest first. Code refers to tier names only; point a tier at
+# another LiteLLM model string (bedrock/…, or openai/… behind a LiteLLM proxy) to change it.
+#
+# Chosen from measurements on 2026-10-18 with local Ollama (single-service typo, cross-service
+# typo, source-code bug that must not be "fixed"):
+#   tev1:4b         correct on single-service, wrong on cross-service, gave up on the code bug
+#   qwen3.5:latest  correct on all three
+#   gpt-oss:20b     correct on both typos, but invented a fix for the code bug, and slower
+tiers:
+  small:
+    model: ollama_chat/tev1:4b-q4_K_M
+    capabilities: [json]
+    timeout_s: 120
+  large:
+    model: ollama_chat/qwen3.5:latest
+    capabilities: [json]
+    timeout_s: 300

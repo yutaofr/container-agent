@@ -1,0 +1,20 @@
+# Test-only: must reach redis at CACHE_HOST:CACHE_PORT. The template ships the typo
+# "rediss", so fixing it needs the other services in view (cross-service, large tier).
+name: cacheclient
+kind: middleware
+provides: { capability: cacheclient }
+image: "busybox:{version}"
+command:
+  - sh
+  - -c
+  - 'nc -z -w 3 "$CACHE_HOST" "$CACHE_PORT" || { echo "FATAL: cannot reach cache at $CACHE_HOST:$CACHE_PORT"; exit 1; }; mkdir -p /www && echo ok > /www/index.html && httpd -f -p 8080 -h /www'
+versions: ["1.37"]
+default_version: "1.37"
+port: 8080
+env:
+  CACHE_HOST: rediss
+  CACHE_PORT: "6379"
+healthcheck:
+  cmd: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+presets:
+  tiny: { mem_limit: 64m, cpus: 0.25 }

@@ -1,4 +1,4 @@
-.PHONY: runner-test runner-integration runner-build platform-test e2e
+.PHONY: runner-test runner-integration runner-build platform-test e2e e2e-llm
 
 runner-test:
 	cd runner && test -z "$$(gofmt -l .)" && go vet ./... && go test ./...
@@ -18,3 +18,8 @@ platform-test:
 # cluster with T0 rules alone.
 e2e: runner-build
 	cd platform && CAGENT_RUNNER=$(CURDIR)/bin/cagent-runner uv run pytest tests/test_cli.py tests/test_hub_e2e.py tests/test_orchestrator_e2e.py
+
+# Model tiers on real Docker. Needs a local Ollama serving the models in platform/models.yaml;
+# CI does not run it.
+e2e-llm: runner-build
+	cd platform && CAGENT_RUNNER=$(CURDIR)/bin/cagent-runner CAGENT_LLM_E2E=1 uv run pytest -s tests/test_llm_e2e.py

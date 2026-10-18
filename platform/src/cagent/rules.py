@@ -90,8 +90,21 @@ def _set(path: str, present: bool, value: Any) -> dict[str, Any]:
 # --- rules ----------------------------------------------------------------------------------
 
 
+def _free_port(port: int, used: set[int]) -> int | None:
+    """The nearest port 1000 apart, upward first, then downward, that the document does not
+    use and that stays within 1024–65535."""
+    for step in (1000, -1000):
+        candidate = port + step
+        while 1024 <= candidate <= 65535:
+            if candidate not in used:
+                return candidate
+            candidate += step
+    return None
+
+
 def port_conflict(problem: Problem, compose: dict[str, Any]) -> Fix | None:
-    """Move a clashing published host port up by 1000 until it is unused in the document."""
+    """Move a clashing published host port by 1000 (up, or down near the top) to a port unused
+    in the document."""
     if problem.kind not in ("port:conflict", "bind:address_in_use"):
         return None
     svc = compose["services"].get(problem.service, {})
@@ -107,10 +120,8 @@ def port_conflict(problem: Problem, compose: dict[str, Any]) -> Fix | None:
         host, sep, container = str(entry).partition(":")
         if not sep or (problem.kind == "port:conflict" and host != problem.detail):
             continue
-        new = int(host) + 1000
-        while new in used:
-            new += 1000
-        if new > 65535:
+        new = _free_port(int(host), used)
+        if new is None:
             return None
         used.add(new)
         patch.append(

@@ -22,12 +22,17 @@ class SimCluster:
         crash: dict[str, int] | None = None,
         findings: list[dict[str, str]] | None = None,
         starting_snapshots: int = 0,
+        requires_env: dict[str, dict[str, str]] | None = None,
+        errors: dict[str, str] | None = None,
     ):
         self.occupied = occupied_ports or set()
         self.needs_mb = needs_mb or {}  # below this mem_limit the service is OOM-killed
         self.crash = crash or {}  # service -> exit code, a failure no T0 rule fixes
         self.findings = findings or []  # lint findings until the user allows them
         self.starting_snapshots = starting_snapshots
+        # service -> environment it needs; until it has it, it exits 1 logging errors[service]
+        self.requires_env = requires_env or {}
+        self.errors = errors or {}
         self.compose: dict[str, Any] | None = None
         self.calls: list[str] = []
         self.builds: list[dict[str, Any]] = []
@@ -81,6 +86,17 @@ class SimCluster:
         elif name in self.crash:
             code = self.crash[name]
             s.update(state="exited", exit_code=code, signatures=[f"exit:{code}@{name}"])
+        elif (want := self.requires_env.get(name)) and any(
+            str((svc.get("environment") or {}).get(k)) != v for k, v in want.items()
+        ):
+            line = self.errors.get(name, f"FATAL: {name} is misconfigured")
+            s.update(
+                state="exited",
+                exit_code=1,
+                error_lines=[line],
+                tail=[line],
+                signatures=[f"exit:1@{name}"],
+            )
         elif "healthcheck" in svc:
             s["health"] = "starting" if self._starting > 0 else "healthy"
         return s

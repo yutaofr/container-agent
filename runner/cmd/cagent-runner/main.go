@@ -189,7 +189,7 @@ func runUp(args []string, stdout, stderr io.Writer, d deps) int {
 		fmt.Fprintf(stderr, "invalid or missing -name %q\n", *cf.name)
 		return exitError
 	}
-	p, rep, err := check(cf, cluster.Project(*cf.name), d)
+	_, rep, err := check(cf, cluster.Project(*cf.name), d)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return exitError
@@ -198,6 +198,17 @@ func runUp(args []string, stdout, stderr io.Writer, d deps) int {
 		fmt.Fprintln(stderr, "refusing to start: validation findings")
 		_ = writeJSON(stdout, rep)
 		return exitFindings
+	}
+	// Checks need interpolated values; the file docker compose reads must keep its "$$".
+	abs, err := filepath.Abs(*cf.file)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitError
+	}
+	p, err := compose.LoadVerbatim(context.Background(), abs, cluster.Project(*cf.name))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitError
 	}
 	w, err := openWorkspace(d)
 	if err != nil {

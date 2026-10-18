@@ -1,0 +1,20 @@
+# Test-only: refuses to start unless APP_MODE is "server". The template ships the typo
+# "srvr", a declared key, so the model tier may fix it without asking (single service).
+name: modecheck
+kind: middleware
+provides: { capability: modecheck }
+image: "busybox:{version}"
+command:
+  - sh
+  - -c
+  - '[ "$APP_MODE" = server ] || { echo "FATAL: APP_MODE must be server, got $APP_MODE"; exit 1; }; mkdir -p /www && echo ok > /www/index.html && httpd -f -p 8080 -h /www'
+versions: ["1.37"]
+default_version: "1.37"
+port: 8080
+env:
+  APP_MODE: srvr
+  LOG_LEVEL: info
+healthcheck:
+  cmd: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+presets:
+  tiny: { mem_limit: 64m, cpus: 0.25 }
