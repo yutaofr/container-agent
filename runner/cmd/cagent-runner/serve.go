@@ -20,6 +20,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 
 	"github.com/yutaofr/container-agent/runner/internal/guard"
+	"github.com/yutaofr/container-agent/runner/internal/initscripts"
 	"github.com/yutaofr/container-agent/runner/internal/redact"
 	"github.com/yutaofr/container-agent/runner/internal/workspace"
 )
@@ -376,13 +377,14 @@ func verifyTool(_ serveConfig, d deps, params json.RawMessage) ([]string, error)
 
 func buildTool(cfg serveConfig, _ deps, params json.RawMessage) ([]string, error) {
 	var p struct {
-		Name    string `json:"name"`
-		Service string `json:"service"`
-		Tag     string `json:"tag"`
-		Maven   string `json:"maven"`
-		Workdir string `json:"workdir"`
-		Stack   string `json:"stack"`
-		JDK     string `json:"jdk"`
+		Name    string               `json:"name"`
+		Service string               `json:"service"`
+		Tag     string               `json:"tag"`
+		Maven   string               `json:"maven"`
+		Workdir string               `json:"workdir"`
+		Stack   string               `json:"stack"`
+		JDK     string               `json:"jdk"`
+		Init    []initscripts.Script `json:"init"`
 	}
 	if err := decode(params, &p); err != nil {
 		return nil, err
@@ -397,7 +399,13 @@ func buildTool(cfg serveConfig, _ deps, params json.RawMessage) ([]string, error
 		if cfg.settings != "" {
 			argv = append(argv, "-settings", cfg.settings)
 		}
+		for _, s := range p.Init {
+			argv = append(argv, "-init", s.Capability+"="+s.Path)
+		}
 	case p.Workdir != "" && p.Maven == "":
+		if len(p.Init) > 0 {
+			return nil, errors.New("init applies to maven builds; a workdir project declares its own scripts")
+		}
 		dir, err := allowedWorkdir(cfg, p.Workdir)
 		if err != nil {
 			return nil, err

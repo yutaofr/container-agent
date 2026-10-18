@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -182,5 +183,103 @@ func TestBuildArgumentErrors(t *testing.T) {
 		if code := run(args, &out, &errOut, testDeps(t)); code != exitError {
 			t.Errorf("%v: exit %d, want %d", args, code, exitError)
 		}
+	}
+}
+
+// zipBytes returns a jar holding entries (name -> body).
+func zipBytes(t *testing.T, entries map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, body := range entries {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestBuildFromMavenStagesInitScriptsFromTheJar(t *testing.T) {
+	jar := zipBytes(t, map[string]string{"BOOT-INF/classes/db/schema.sql": "CREATE TABLE t (id INT);"})
+	repo := maventest.New(t, "dev", "token")
+	repo.PutRelease("com.acme", "web", "1.0.0", jar)
+	d, f, dir := buildDeps(t)
+	expectBuild(f, dir, sha256Hex(string(jar)))
+
+	code, res, stderr := runBuildCmd(t, d, "-maven", "com.acme:web:1.0.0",
+		"-settings", repo.SettingsXML(t, t.TempDir()), "-init", "mysql=db/schema.sql")
+	if code != exitOK {
+		t.Fatalf("exit %d, stderr %s, res %+v", code, stderr, res)
+	}
+	if len(res.Init) != 1 || res.Init[0].File != "01-schema.sql" || res.Init[0].SHA256 != sha256Hex("CREATE TABLE t (id INT);") {
+		t.Errorf("init %+v", res.Init)
+	}
+	staged := filepath.Join(filepath.Dir(filepath.Dir(dir)), "init", "web", "mysql", "01-schema.sql")
+	if got, _ := os.ReadFile(staged); string(got) != "CREATE TABLE t (id INT);" {
+		t.Errorf("staged %q", got)
+	}
+}
+
+func TestBuildFailsOnAScriptTheJarLacks(t *testing.T) {
+	repo := maventest.New(t, "dev", "token")
+	repo.PutRelease("com.acme", "web", "1.0.0", zipBytes(t, map[string]string{"x.txt": "x"}))
+	d, f, _ := buildDeps(t)
+	code, res, _ := runBuildCmd(t, d, "-maven", "com.acme:web:1.0.0",
+		"-settings", repo.SettingsXML(t, t.TempDir()), "-init", "mysql=db/schema.sql")
+	if code != exitFindings || !strings.Contains(res.Error, "db/schema.sql") {
+		t.Fatalf("exit %d, res %+v", code, res)
+	}
+	for _, c := range f.Calls {
+		if strings.HasPrefix(c, "build ") {
+			t.Errorf("image built despite a missing script: %s", c)
+		}
+	}
+}
+
+func TestBuildFromWorkdirStagesTheProjectsOwnScripts(t *testing.T) {
+	proj := project(t, map[string]string{
+		"Dockerfile":    "FROM busybox\n",
+		"db/schema.sql": "CREATE TABLE t (id INT);",
+		".cagent/services/web.yaml": "name: web\nstack: dockerfile\nsources:\n  workdir: {dockerfile: Dockerfile}\n" +
+			"requires:\n  - capability: mysql\n    init: {scripts: [db/schema.sql]}\n",
+	})
+	d, f, dir := buildDeps(t)
+	f.Responses["build -t "+webTag+" --label cagent.managed=true -f "+filepath.Join(proj, "Dockerfile")+" "+proj] = dockercli.FakeResponse{}
+	code, res, stderr := runBuildCmd(t, d, "-workdir", proj)
+	if code != exitOK || len(res.Init) != 1 || res.Init[0].Capability != "mysql" {
+		t.Fatalf("exit %d, stderr %s, res %+v", code, stderr, res)
+	}
+	staged := filepath.Join(filepath.Dir(filepath.Dir(dir)), "init", "web", "mysql", "01-schema.sql")
+	if _, err := os.Stat(staged); err != nil {
+		t.Error(err)
+	}
+	// The project's descriptor decides what runs; the caller cannot add scripts.
+	code, _, stderr = runBuildCmd(t, d, "-workdir", proj, "-init", "mysql=db/schema.sql")
+	if code != exitError || !strings.Contains(stderr, "-init") {
+		t.Errorf("exit %d, stderr %s", code, stderr)
+	}
+}
+
+func TestBuildToolPassesInitScriptsForMavenOnly(t *testing.T) {
+	argv, err := buildTool(serveConfig{}, deps{}, json.RawMessage(`{"name":"demo","service":"web",`+
+		`"tag":"cagent/web:x","maven":"a:b:1","init":[{"capability":"mysql","path":"db/schema.sql"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(argv, " "); !strings.HasSuffix(got, "-init mysql=db/schema.sql") {
+		t.Errorf("argv %s", got)
+	}
+	root := t.TempDir()
+	_, err = buildTool(serveConfig{workdirRoots: []string{root}}, deps{}, json.RawMessage(`{"name":"demo",`+
+		`"service":"web","tag":"cagent/web:x","workdir":"`+root+`","init":[{"capability":"mysql","path":"a.sql"}]}`))
+	if err == nil {
+		t.Error("init accepted with workdir")
 	}
 }
