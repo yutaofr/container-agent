@@ -1,6 +1,6 @@
 // Package verify runs acceptance levels L1–L3 against a cluster snapshot.
 //
-//	L1  every container is running
+//	L1  every container is running; a one-shot init container has exited 0
 //	L2  every container with a healthcheck is healthy
 //	L3  every probe passes
 //
@@ -101,6 +101,19 @@ func Verify(ctx context.Context, d dockercli.Docker, snap signals.Snapshot, prob
 }
 
 func levelOne(s signals.Service) Result {
+	if s.Role == signals.RoleInit {
+		r := Result{Level: "L1", Service: s.Service, OK: s.Completed(), Detail: "init completed"}
+		switch {
+		case s.State == "running" || s.State == "created":
+			r.Detail = "init still running"
+		case !r.OK:
+			r.Detail = fmt.Sprintf("init failed, exit %d", s.ExitCode)
+			if n := len(s.Tail); n > 0 {
+				r.Detail += ": " + s.Tail[n-1]
+			}
+		}
+		return r
+	}
 	r := Result{Level: "L1", Service: s.Service, OK: s.State == "running", Detail: s.State}
 	switch {
 	case !r.OK:
