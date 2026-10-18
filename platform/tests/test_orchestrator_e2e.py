@@ -66,7 +66,8 @@ async def test_real_cluster_heals_a_port_conflict_and_an_oom_kill(tmp_path):
         status = await o.start("run-1", spec, "e2e")
         assert status.waiting["kind"] == "approval"
         published = yaml.safe_load(status.waiting["compose"])["services"]["redis"]["ports"]
-        assert published == [f"{port + 1000}:6379"], "the port conflict is fixed before approval"
+        # Moved by 1000: up, or down when the taken port is near 65535.
+        assert published in ([f"{port + 1000}:6379"], [f"{port - 1000}:6379"]), published
 
         status = await o.resume("run-1", {"approve": True})
         assert status.outcome == "healthy", status.waiting

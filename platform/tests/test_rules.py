@@ -228,3 +228,9 @@ def test_every_rules_fix_passes_the_gate():
 )
 def test_gate_rejects(why, patch):
     assert not within_environment(patch), why
+
+
+def test_port_conflict_near_the_top_moves_down():
+    # Ephemeral ports reach 65535; stepping up would leave the valid range.
+    out = fixed(Problem("port:conflict", "db", "65271"), compose(db={"ports": ["65271:6379"]}))
+    assert out["services"]["db"]["ports"] == ["64271:6379"]
