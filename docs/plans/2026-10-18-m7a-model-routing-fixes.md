@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** When no T0 rule covers a failure, let a model tier read the evidence and propose a fix; apply it only if it stays inside the environment and touches declared keys, hold it for a person if it sets an undeclared key or loads a JVM agent, and never apply anything else.
+**Goal:** When no T0 rule covers a failure, let a model tier read the evidence and propose a fix; apply it only if it stays inside the environment and touches declared keys, hold it for a person if it sets an undeclared key or a JVM option that loads code or runs a command, and never apply anything else.
 
 **Architecture:** `cagent.llm` is the model gateway: tiers in `platform/models.yaml` map to LiteLLM model strings, and a `Router` asks for a Pydantic-validated answer, retrying once and then moving up a tier. `cagent.diagnose` builds the prompt (secrets masked, `$$` shown as `$`), picks the starting tier by rules, and judges the returned JSON Patch: apply, approve, or reject. The orchestrator calls it from `diagnose` for problems T0 cannot fix, adds an `approve_patch` interrupt, and undoes a model fix that breaks the compose document.
 
@@ -22,7 +22,7 @@
 | LiteLLM SDK in-process with `response_format=<Pydantic model>` | Verified with Ollama: all three local models returned schema-valid JSON. A LiteLLM proxy can sit behind the same model strings later. |
 | Tiers `small = tev1:4b`, `large = qwen3.5:latest` | Measured (table below). `gpt-oss:20b` invented a fix for a code bug, so it is not a default. |
 | Starting tier by rules: cross-service evidence or an unknown signature → large; +1 per failed attempt | Design 7.2: models do not rate themselves. A near-miss of another service's name (`rediss` vs `redis`, `difflib` ≥ 0.8) marks cross-service evidence. |
-| Judge every model patch: reject outside the M6 gate; approve when it sets an undeclared env key or a `-javaagent/-agentpath/-agentlib` value; else apply | The roadmap's allowlist: declared keys come from the service's own definition, so they track what the application uses. |
+| Judge every model patch: reject outside the M6 gate; approve when it sets an undeclared env key, or a value that loads a JVM agent (`-javaagent/-agentpath/-agentlib`) or runs a command on JVM failure (`-XX:OnError`, `-XX:OnOutOfMemoryError`); else apply | The roadmap's allowlist: declared keys come from the service's own definition, so they track what the application uses. |
 | Prompt view masks secret-looking env values and shows `$$` as `$` | Found on real models: shown `$$CACHE_PORT`, a model judged the command broken and gave up. |
 | A model fix that makes `validate` fail is undone and counts as a failed attempt; a model repeating a tried state is a failed attempt, not oscillation | Found on real models: a fix passed the gate but produced an invalid `depends_on`; the retry repeated it. T0 rules keep strict oscillation. |
 
@@ -66,7 +66,7 @@ flowchart TD
 
 - Work on a feature branch, not `main`.
 - **Go is not installed on the host.** Run Go commands in the container as before.
-- **Ollama** at `localhost:11434` serving `tev1:4b-q4_K_M` and `qwen3.5:latest` — needed only for Task 7's live test (`ollama list` shows them). Everything else uses a scripted fake model.
+- **Ollama** at `localhost:11434` serving `tev1:4b-q4_K_M` and `qwen3.5:latest` — needed only for Task 8's live test (`ollama list` shows them). Everything else uses a scripted fake model.
 
 ---
 
@@ -683,6 +683,21 @@ def op(op, path, value=None):
             [op("replace", "/services/web/environment/JAVA_OPTS", "-Xmx1g -agentpath:/a.so")],
             "approve",
         ),
+        (
+            [
+                op(
+                    "replace",
+                    "/services/web/environment/JAVA_OPTS",
+                    "-XX:OnOutOfMemoryError=sh -c x",
+                )
+            ],
+            "approve",
+        ),
+        (
+            [op("replace", "/services/web/environment/JAVA_OPTS", "-Xmx1g -XX:OnError=/x")],
+            "approve",
+        ),
+        ([op("replace", "/services/web/environment/JAVA_OPTS", "-Xmx1g -XX:+UseG1GC")], "apply"),
         ([op("replace", "/services/web/image", "evil:1")], "reject"),
         ([op("add", "/services/web/environment/LD_PRELOAD", "/x.so")], "reject"),
     ],
@@ -829,7 +844,8 @@ The model sees the failing service's redacted evidence and its compose config (w
 values masked), proposes a JSON Patch, and the patch is judged before anything changes:
 
   apply    inside the environment gate, and only declared environment keys
-  approve  inside the gate, but sets an undeclared key or loads a JVM agent: a person decides
+  approve  inside the gate, but sets an undeclared key, or a value that loads a JVM agent or
+           runs a command on JVM failure: a person decides
   reject   outside the gate: never applied; the next attempt moves up a tier
 
 Declared keys come from the service's own definition (descriptor env, bind keys, template
@@ -890,7 +906,9 @@ SYSTEM = (
 )
 
 _SECRET_KEY = re.compile(r"(?i)password|passwd|pwd|secret|token|api_?key|access_?key")
-_AGENT_VALUE = re.compile(r"(?i)-(javaagent|agentpath|agentlib)[:=]")
+# JVM options that load code or run a shell command: agents, and the OnError/OnOutOfMemoryError
+# hooks, which execute their argument when the JVM crashes or runs out of memory.
+_AGENT_VALUE = re.compile(r"(?i)-(javaagent|agentpath|agentlib)[:=]|-XX:\+?On(OutOfMemory)?Error\b")
 _ENV_KEY_PATH = re.compile(r"/services/([^/]+)/environment/([^/]+)")
 _ENV_ROOT_PATH = re.compile(r"/services/([^/]+)/environment")
 _CROSS_KINDS = {"conn:refused", "dns:unresolved", "auth:denied"}
@@ -980,7 +998,10 @@ def judge(patch: list[dict[str, Any]], declared: dict[str, set[str]]) -> tuple[s
         if op["path"].split("/")[3:4] == ["environment"] and any(
             _AGENT_VALUE.search(v) for v in _values(op.get("value"))
         ):
-            reasons.append("a value loads a JVM agent (-javaagent, -agentpath, -agentlib)")
+            reasons.append(
+                "a value loads a JVM agent or command hook "
+                "(-javaagent, -agentpath, -agentlib, -XX:OnError, -XX:OnOutOfMemoryError)"
+            )
     return ("approve", reasons) if reasons else ("apply", [])
 
 
@@ -1054,7 +1075,7 @@ async def propose(
 **Step 5: Run tests to verify they pass**
 
 Run: `cd platform && uv run pytest tests/test_diagnose.py && cd .. && make platform-test`
-Expected: `20 passed`; then `139 passed, 3 skipped`.
+Expected: `23 passed`; then `142 passed, 3 skipped`.
 
 **Step 6: Commit**
 
@@ -1894,7 +1915,7 @@ class Orchestrator:
 **Step 6: Run tests to verify they pass**
 
 Run: `cd platform && uv run pytest tests/test_orchestrator_llm.py && cd .. && make platform-test`
-Expected: `9 passed`; then `148 passed, 3 skipped`. M6's orchestrator tests pass unchanged.
+Expected: `9 passed`; then `151 passed, 3 skipped`. M6's orchestrator tests pass unchanged.
 
 **Step 7: Commit**
 
@@ -2032,7 +2053,7 @@ CAGENT_RUNNER=$PWD/../bin/cagent-runner CAGENT_LLM_E2E=1 uv run pytest -q; cd ..
 docker ps -a --format '{{.Names}}' | grep -E "m6-|m7-"; pgrep -fl "cagent-runner serve"; rm -rf bin; echo checked
 ```
 
-Expected: three `1 passed` runs with the three fixes above; `152 passed` for the full suite; then only `checked`. If a run fails, print the prompt the model received before changing anything (wrap `LiteLLMCompleter.complete` to print `user`): both planning bugs above showed up first as "wrong" model answers to evidence that was itself wrong.
+Expected: three `1 passed` runs with the three fixes above; `155 passed` for the full suite; then only `checked`. If a run fails, print the prompt the model received before changing anything (wrap `LiteLLMCompleter.complete` to print `user`): both planning bugs above showed up first as "wrong" model answers to evidence that was itself wrong.
 
 **Step 4: Commit**
 
@@ -2083,7 +2104,7 @@ flowchart TD
   A --> M["Model answers a Diagnosis schema<br/>(invalid → retry once → next tier)"]
   M --> G{"Judge the patch"}
   G -->|"outside the environment gate"| R["reject: never applied; next tier"]
-  G -->|"undeclared env key, or -javaagent/-agentpath/-agentlib"| H["approve_patch ⏸ a person decides"]
+  G -->|"undeclared env key, JVM agent,<br/>or -XX:OnError hook"| H["approve_patch ⏸ a person decides"]
   G -->|"declared keys only"| AP["apply"]
   M -->|"empty patch"| E["escalate: no_fix, with the root cause"]
   AP --> V{"Runner validate"}
@@ -2179,7 +2200,7 @@ git commit -m "docs: record model tiers, the patch judge, and the M7a/M7b split"
 ## Milestone 7a done when
 
 - [ ] `make runner-test` passes (thirteen packages `ok`)
-- [ ] `make platform-test` passes: ruff clean, `148 passed, 4 skipped`
+- [ ] `make platform-test` passes: ruff clean, `151 passed, 4 skipped`
 - [ ] Task 7 passes three times in a row on the host with local Ollama, nothing left behind
 - [ ] `runner` and `platform` workflows green on the PR (CI skips the model test)
 
