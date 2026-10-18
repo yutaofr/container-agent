@@ -94,7 +94,7 @@ func addComposeFlags(fs *flag.FlagSet, defaultName string) composeFlags {
 
 // check loads a compose file under project and runs every validation. The returned
 // project is the loaded one, ready to start when the report is clean.
-func check(cf composeFlags, project string, free func(int) bool) (*types.Project, Report, error) {
+func check(cf composeFlags, project string, d deps) (*types.Project, Report, error) {
 	abs, err := filepath.Abs(*cf.file)
 	if err != nil {
 		return nil, Report{}, err
@@ -114,6 +114,8 @@ func check(cf composeFlags, project string, free func(int) bool) (*types.Project
 	if err != nil {
 		return nil, Report{}, err
 	}
+	own := ownPorts(ctx, d.docker, *cf.name)
+	free := func(port int) bool { return own[port] || d.free(port) }
 	fields, err := compose.LoadFields(ctx, abs, project)
 	if err != nil {
 		return nil, Report{}, err
@@ -130,6 +132,28 @@ func check(cf composeFlags, project string, free func(int) bool) (*types.Project
 	return p, rep, nil
 }
 
+// ownPorts returns the host ports this cluster's own managed containers already publish.
+// When a fix is re-applied, the running cluster must not count as a conflict with itself.
+// Containers without the managed label do not count, and an unavailable docker means none.
+func ownPorts(ctx context.Context, d dockercli.Docker, name string) map[int]bool {
+	own := map[int]bool{}
+	if !workspace.ValidName(name) {
+		return own
+	}
+	cs, err := dockercli.ProjectContainers(ctx, d, cluster.Project(name))
+	if err != nil {
+		return own
+	}
+	for _, c := range cs {
+		if compose.IsManaged(c.Config.Labels) {
+			for _, p := range c.PublishedPorts() {
+				own[p] = true
+			}
+		}
+	}
+	return own
+}
+
 func (r Report) clean() bool { return len(r.Findings) == 0 && len(r.PortConflicts) == 0 }
 
 func runValidate(args []string, stdout, stderr io.Writer, d deps) int {
@@ -139,7 +163,7 @@ func runValidate(args []string, stdout, stderr io.Writer, d deps) int {
 	if err := fs.Parse(args); err != nil {
 		return exitError
 	}
-	_, rep, err := check(cf, *cf.name, d.free)
+	_, rep, err := check(cf, *cf.name, d)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return exitError
@@ -165,7 +189,7 @@ func runUp(args []string, stdout, stderr io.Writer, d deps) int {
 		fmt.Fprintf(stderr, "invalid or missing -name %q\n", *cf.name)
 		return exitError
 	}
-	p, rep, err := check(cf, cluster.Project(*cf.name), d.free)
+	p, rep, err := check(cf, cluster.Project(*cf.name), d)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return exitError

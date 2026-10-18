@@ -139,6 +139,7 @@ class MiddlewareTemplate(Strict):
     kind: Literal["middleware"]
     provides: Provides
     image: str  # "{version}" is replaced by the chosen version
+    command: list[str] | None = None  # overrides the image's default command
     versions: list[str]
     default_version: str
     port: PortNumber

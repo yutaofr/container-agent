@@ -68,6 +68,8 @@ def generate(spec: ClusterSpec, catalog: Catalog) -> dict[str, Any]:
             continue
         values = {"host": ref.instance, "port": str(tpl.port), **tpl.connection}
         svc: dict[str, Any] = {"image": tpl.image.replace("{version}", version)}
+        if tpl.command:
+            svc["command"] = [escape_compose(c) for c in tpl.command]
         if tpl.env:
             svc["environment"] = {
                 k: escape_compose(render(v, values)) for k, v in sorted(tpl.env.items())

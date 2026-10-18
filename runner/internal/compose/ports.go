@@ -1,9 +1,11 @@
 package compose
 
 import (
+	"context"
 	"net"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/compose-spec/compose-go/v2/types"
 )
@@ -40,9 +42,45 @@ func HostPortConflicts(p *types.Project, free func(port int) bool) []PortConflic
 	return out
 }
 
-// TCPPortFree reports whether a TCP port can be bound on all interfaces.
+// TCPPortFree reports whether Docker could publish a TCP port: it must bind on the IPv4
+// wildcard, IPv4 loopback, and (where the host has IPv6) the IPv6 wildcard. Each probe
+// clears SO_REUSEADDR, which Go sets by default: with it, BSD-derived kernels such as
+// macOS let a wildcard bind succeed while another program holds the port on a specific
+// address or the other address family, and the check would miss a real conflict.
 func TCPPortFree(port int) bool {
-	l, err := net.Listen("tcp", ":"+strconv.Itoa(port))
+	p := strconv.Itoa(port)
+	for _, probe := range []struct{ network, addr string }{
+		{"tcp4", "0.0.0.0:" + p},
+		{"tcp4", "127.0.0.1:" + p},
+		{"tcp6", "[::]:" + p},
+	} {
+		l, err := noReuseListen.Listen(context.Background(), probe.network, probe.addr)
+		if err != nil {
+			if probe.network == "tcp6" && !ipv6Available() {
+				continue
+			}
+			return false
+		}
+		_ = l.Close()
+	}
+	return true
+}
+
+var noReuseListen = net.ListenConfig{
+	Control: func(_, _ string, c syscall.RawConn) error {
+		var serr error
+		if err := c.Control(func(fd uintptr) {
+			serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 0)
+		}); err != nil {
+			return err
+		}
+		return serr
+	},
+}
+
+// ipv6Available reports whether the host can bind IPv6 at all.
+func ipv6Available() bool {
+	l, err := net.Listen("tcp6", "[::1]:0")
 	if err != nil {
 		return false
 	}
