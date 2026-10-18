@@ -36,7 +36,7 @@ from langgraph.types import Command, interrupt
 from cagent.catalog import Catalog, ServiceDescriptor
 from cagent.clarify import AnswerError, apply_answer, extract, question
 from cagent.diagnose import declared_env, propose
-from cagent.draft import DraftError, draft, read_back, resource_note
+from cagent.draft import DraftError, draft, read_back
 from cagent.gaps import ANSWERABLE, Gap
 from cagent.generate import GenerationError, generate, to_yaml
 from cagent.hub import ToolResult
@@ -356,7 +356,7 @@ class Orchestrator:
                 "drafting": {
                     **d,
                     "files": {drafted.path: drafted.text},
-                    "note": resource_note(res.output["resources"]),
+                    "note": drafted.note,
                 }
             },
             goto="save",

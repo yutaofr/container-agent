@@ -8,7 +8,6 @@ from cagent.draft import (
     env_placeholders,
     pick,
     read_back,
-    resource_note,
     skeletons,
 )
 from cagent.llm import ModelUnavailable, Router
@@ -257,10 +256,3 @@ def test_read_back_validates_the_file_on_disk():
 def test_read_back_refuses_what_cannot_be_used(files, why):
     with pytest.raises(DraftError, match=why):
         read_back("ui", inspection(files))
-
-
-def test_resource_note():
-    note = resource_note(SHOP["resources"])
-    assert "Flyway or Liquibase migrations run when the application starts" in note
-    assert "cql/keyspace.cql" in note and "M7c" in note
-    assert resource_note([]) == ""
