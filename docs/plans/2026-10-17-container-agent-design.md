@@ -405,7 +405,7 @@ flowchart LR
 - **Image tags and cache**: images keep the generator's tag `cagent/<service>:<source>-<ref>` and carry the label `cagent.artifact-sha256`. A build is skipped when the existing image's label matches the artifact: a new snapshot build under the same tag rebuilds, an unchanged artifact does not.
 - **Stack templates**: `java-springboot` renders `FROM eclipse-temurin:<jdk>-jre` (JDK 21 unless the request names another) plus the jar. The JRE images ship `curl`, which the generated HTTP healthchecks use.
 - **Single-service rebuild**: after a code change in a working directory, replace just that service's container in one step.
-- **Unregistered projects**: the agent reads pom, gradle, package.json, go.mod, and any existing Dockerfile to draft a descriptor. Once the cluster works, the user can submit the draft to the project repository as a PR.
+- **Unregistered projects**: the agent reads pom, gradle, package.json, go.mod, and any existing Dockerfile to draft a descriptor. Once the cluster works, the user can submit the draft to the project repository as a PR. M7b refines this: the Runner's read-only `inspect` reads a fixed file set, the user saves the draft to `.cagent/services/<name>.yaml` before anything builds, and projects with their own Dockerfile use a `dockerfile` stack ([M7b design](2026-10-18-m7b-clarify-inspection-design.md)).
 
 ### 6.3 Middleware templates and ClusterSpec
 
