@@ -1,4 +1,5 @@
-// Package builder turns a local artifact into a labelled image with a stack template.
+// Package builder turns a local artifact into a labelled image with a stack template, or
+// builds a project's own Dockerfile (stack dockerfile).
 package builder
 
 import (
@@ -104,6 +105,19 @@ func Build(ctx context.Context, d dockercli.Docker, req Request) (bool, error) {
 		return false, &BuildError{Err: err, Log: tail(out, 30)}
 	}
 	return false, nil
+}
+
+// BuildDockerfile builds tag from a project's own Dockerfile and context, which the caller
+// has confined to the project. Docker's layer cache decides what is rebuilt.
+func BuildDockerfile(ctx context.Context, d dockercli.Docker, tag, dockerfile, contextDir string) error {
+	if !ValidTag(tag) {
+		return fmt.Errorf("invalid image tag %q: must be cagent/<service>:<ref>", tag)
+	}
+	out, err := d.Combined(ctx, "build", "-t", tag, "--label", "cagent.managed=true", "-f", dockerfile, contextDir)
+	if err != nil {
+		return &BuildError{Err: err, Log: tail(out, 30)}
+	}
+	return nil
 }
 
 func tail(out []byte, n int) []string {

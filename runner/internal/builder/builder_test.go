@@ -56,6 +56,32 @@ func TestBuildWritesDockerfileAndBuilds(t *testing.T) {
 	}
 }
 
+func TestBuildDockerfileUsesTheProjectsDockerfile(t *testing.T) {
+	cmd := "build -t " + tag + " --label cagent.managed=true -f /p/api/Dockerfile /p/api"
+	f := &dockercli.Fake{Responses: map[string]dockercli.FakeResponse{cmd: {}}}
+	if err := BuildDockerfile(context.Background(), f, tag, "/p/api/Dockerfile", "/p/api"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Calls) != 1 {
+		t.Errorf("calls %v", f.Calls)
+	}
+}
+
+func TestBuildDockerfileFailureCarriesRedactedLog(t *testing.T) {
+	cmd := "build -t " + tag + " --label cagent.managed=true -f /p/Dockerfile /p"
+	f := &dockercli.Fake{Responses: map[string]dockercli.FakeResponse{
+		cmd: {Out: "step 2\npassword=hunter2\nERROR: failed to solve", Err: errors.New("exit status 1")},
+	}}
+	err := BuildDockerfile(context.Background(), f, tag, "/p/Dockerfile", "/p")
+	var be *BuildError
+	if !errors.As(err, &be) || strings.Contains(strings.Join(be.Log, "\n"), "hunter2") {
+		t.Fatalf("got %v", err)
+	}
+	if err := BuildDockerfile(context.Background(), f, "nginx:latest", "/p/Dockerfile", "/p"); err == nil {
+		t.Error("tag outside cagent/ accepted")
+	}
+}
+
 func TestBuildReusesImageWithSameArtifact(t *testing.T) {
 	f := &dockercli.Fake{Responses: map[string]dockercli.FakeResponse{inspect: {Out: sha + "\n"}}}
 	cached, err := Build(context.Background(), f, Request{Tag: tag, Stack: "java-springboot", Dir: t.TempDir(), SHA256: sha})

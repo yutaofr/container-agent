@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yutaofr/container-agent/runner/internal/dockercli"
@@ -114,6 +115,59 @@ func TestBuildFromWorkdirFailureReportsLog(t *testing.T) {
 	}
 	if len(f.Calls) != 0 {
 		t.Errorf("docker called after a failed build: %v", f.Calls)
+	}
+}
+
+// project writes files (relative path -> content) into a fresh working directory.
+func project(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for rel, body := range files {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return real
+}
+
+func TestBuildFromWorkdirWithTheProjectsDockerfile(t *testing.T) {
+	proj := project(t, map[string]string{
+		"api/Dockerfile": "FROM busybox\n",
+		".cagent/services/web.yaml": "name: web\nstack: dockerfile\nsources:\n  workdir:\n" +
+			"    build: 'touch api/built'\n    dockerfile: api/Dockerfile\n    context: api\n",
+	})
+	d, f, _ := buildDeps(t)
+	cmd := "build -t " + webTag + " --label cagent.managed=true -f " + filepath.Join(proj, "api", "Dockerfile") + " " + filepath.Join(proj, "api")
+	f.Responses[cmd] = dockercli.FakeResponse{}
+	code, res, stderr := runBuildCmd(t, d, "-workdir", proj, "-stack", "dockerfile")
+	if code != exitOK || res.Source != "workdir:"+proj || res.SHA256 != "" || res.Cached {
+		t.Fatalf("exit %d, stderr %s, res %+v", code, stderr, res)
+	}
+	if _, err := os.Stat(filepath.Join(proj, "api", "built")); err != nil {
+		t.Error("the descriptor's build command did not run first")
+	}
+}
+
+func TestBuildRefusesAStackOtherThanTheProjects(t *testing.T) {
+	proj := project(t, map[string]string{
+		"Dockerfile":           "FROM busybox\n",
+		".cagent/service.yaml": "name: web\nstack: java-springboot\nsources:\n  workdir: { build: 'true', output: 'x.jar' }\n",
+	})
+	d, f, _ := buildDeps(t)
+	code, _, stderr := runBuildCmd(t, d, "-workdir", proj, "-stack", "dockerfile")
+	if code != exitError || !strings.Contains(stderr, `stack "dockerfile" differs from the project's descriptor ("java-springboot")`) {
+		t.Fatalf("exit %d, stderr %s", code, stderr)
+	}
+	if len(f.Calls) != 0 {
+		t.Errorf("docker called: %v", f.Calls)
 	}
 }
 
