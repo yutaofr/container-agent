@@ -131,3 +131,24 @@ func TestOwnPublishedPortsAreNotConflicts(t *testing.T) {
 		}
 	}
 }
+
+func TestUpKeepsDollarEscapes(t *testing.T) {
+	// The container must see $CACHE_HOST and expand it itself. Writing an interpolated
+	// project back out would leave "$CACHE_HOST" in the file, and docker compose would then
+	// interpolate it again from the host environment: an empty string.
+	src := writeFile(t, "services:\n  c:\n    image: busybox:1.37\n"+
+		"    command: [\"sh\", \"-c\", \"echo $$CACHE_HOST\"]\n    environment: { CACHE_HOST: redis }\n")
+	d, f, root := withDocker(t, nil)
+	written := filepath.Join(root, "clusters", "demo", "compose.yaml")
+	f.Responses = map[string]dockercli.FakeResponse{
+		"compose -p cagent-demo -f " + written + " up -d --remove-orphans": {},
+	}
+	var out, errOut bytes.Buffer
+	if code := run([]string{"up", "-name", "demo", "-f", src}, &out, &errOut, d); code != exitOK {
+		t.Fatalf("exit %d, stderr: %s", code, errOut.String())
+	}
+	data, _ := os.ReadFile(written)
+	if !strings.Contains(string(data), "echo $$CACHE_HOST") {
+		t.Errorf("escape lost in the written compose file:\n%s", data)
+	}
+}

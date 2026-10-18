@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -47,5 +48,20 @@ services:
 `)
 	if _, err := Load(context.Background(), path, "demo"); err == nil {
 		t.Fatal("want schema error for unknown key, got nil")
+	}
+}
+
+func TestLoadVerbatimKeepsEscapes(t *testing.T) {
+	path := writeCompose(t, "services:\n  c:\n    image: busybox\n    command: [\"echo\", \"$$HOME\"]\n")
+	p, err := LoadVerbatim(context.Background(), path, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := p.MarshalYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "$$HOME") {
+		t.Errorf("escape lost:\n%s", out)
 	}
 }
