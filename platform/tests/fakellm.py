@@ -17,9 +17,11 @@ class FakeCompleter:
         requested schema) or an exception instance to raise."""
         self.script = {model: list(answers) for model, answers in script.items()}
         self.calls: list[tuple[str, str]] = []  # (model, user prompt)
+        self.thinks: list[bool | None] = []
 
-    async def complete(self, model, system, user, schema, timeout_s):
+    async def complete(self, model, system, user, schema, timeout_s, think=None):
         self.calls.append((model, user))
+        self.thinks.append(think)
         answer = self.script[model].pop(0)
         if isinstance(answer, Exception):
             raise answer
