@@ -110,6 +110,7 @@ flowchart LR
 - Writes workspace files by opening the declared path with `O_NOFOLLOW` after the guard check, so a symlink planted between the check and the write is refused.
 - Runs L3 probes from a throwaway `busybox` container on the cluster network, because container IPs are not reachable from the host on every platform (Docker Desktop on macOS, for one).
 - Checks a published host port the way Docker will use it: it must bind on the IPv4 wildcard, IPv4 loopback, and IPv6 wildcard, each probed with `SO_REUSEADDR` cleared. With the option set, as Go sets it by default, macOS lets a wildcard bind succeed while another program holds the port on a specific address, and a real conflict would be missed. Ports published by the cluster's own managed containers count as free, so re-applying a fix never sees the running cluster as a conflict with itself.
+- Writes the compose file it starts from a non-interpolated load of the input, while every check runs on the interpolated project. compose-go's `MarshalYAML` does not re-escape `$`, so writing the interpolated project would turn each `$$` into `$` and docker compose would interpolate it a second time from the host environment, leaving shell variables in commands empty.
 
 ### 3.3 POC vs. production
 
@@ -274,7 +275,7 @@ T0 rules in the POC (`platform/src/cagent/rules.py`). Each turns one problem int
 
 | Rule | Problem (signature kind) | Fix | Declines when |
 |---|---|---|---|
-| `port_conflict` | `port:conflict` from validate, `bind:address_in_use` at runtime | move the published host port up by 1000 until unused in the document | the new port would exceed 65535 |
+| `port_conflict` | `port:conflict` from validate, `bind:address_in_use` at runtime | move the published host port by 1000, upward or, near the top of the range, downward, to a port unused in the document | no port within 1024–65535 is free in the document |
 | `oom_killed` | `oom:killed` | double `mem_limit` (512m when unset) | already at 4096m |
 | `java_heap` | `oom:app` | double `-Xmx` in `JAVA_OPTS`, keep `mem_limit` ≥ 2 × heap | no `-Xmx`, or the heap would pass 2048m |
 | `arch_mismatch` | `image:arch_mismatch` | add `platform: linux/amd64` | a platform is already set |
@@ -513,6 +514,38 @@ Each model carries tags such as `tool_use`, `json_mode`, and `context`. The rout
 ### 7.4 User overrides
 
 Override order: platform default < team < user < this cluster. The web UI offers presets ("large model everywhere", "local models only") and per-node pinning.
+
+### 7.5 T1/T2 in the POC (M7a)
+
+`platform/models.yaml` defines two tiers, cheapest first. They were chosen by measurement on 2026-10-18 with local Ollama, on a single-service typo, a cross-service typo, and a source-code bug that must not be "fixed":
+
+| Model | Single-service | Cross-service | Code bug (must give up) | Tier |
+|---|---|---|---|---|
+| `tev1:4b` | fixed | wrong fix | gave up | small |
+| `qwen3.5:latest` (9.7B) | fixed | fixed | gave up | large |
+| `gpt-oss:20b` | fixed | fixed | **invented a fix** | — |
+
+```mermaid
+flowchart TD
+  P["Problem no T0 rule covers"] --> X{"Evidence names another service,<br/>or a near-miss of one (rediss→redis),<br/>or conn/dns/auth kind?"}
+  X -->|yes| L["start on large; prompt shows every service"]
+  X -->|no| S["start on small; prompt shows this service only"]
+  L --> A["+1 tier per failed attempt on this signature"]
+  S --> A
+  A --> M["Model answers a Diagnosis schema<br/>(invalid → retry once → next tier)"]
+  M --> G{"Judge the patch"}
+  G -->|"outside the environment gate"| R["reject: never applied; next tier"]
+  G -->|"undeclared env key, JVM agent,<br/>or -XX:OnError hook"| H["approve_patch ⏸ a person decides"]
+  G -->|"declared keys only"| AP["apply"]
+  M -->|"empty patch"| E["escalate: no_fix, with the root cause"]
+  AP --> V{"Runner validate"}
+  V -->|"invalid compose"| U["undo; counts as a failed attempt"]
+  V -->|ok| UP["up → watch: the signature must disappear"]
+```
+
+- **Declared keys** come from the service's own definition: descriptor `runtime.env.required` and `defaults`, `requires[].bind` keys, the spec's own `env`, and a middleware template's `env`.
+- **What the model sees**: redacted log lines, and the compose document with secret-looking environment values masked and `$$` shown as `$`. Shown the escape, a model once read `$$CACHE_PORT` as a bug in the command and gave up.
+- **Safety nets beyond the gate**: an applied fix that breaks the compose document is undone; a model repeating a state already tried counts as a failed attempt rather than oscillation; and the per-signature budget plus the watch loop reject any fix that does not make the failure go away — which is what stops a confident but wrong answer such as `gpt-oss:20b`'s invented database URL.
 
 ## 8. Security
 

@@ -15,7 +15,8 @@ flowchart LR
   M4["M4 Artifacts & builds<br/>Go"]
   M5["M5 Runner ↔ platform link<br/>Go + Python"]
   M6["M6 Deterministic orchestrator<br/>Python"]
-  M7["M7 LLM nodes & routing<br/>Python"]
+  M7a["M7a Model routing & T1/T2 fixes<br/>Python"]
+  M7b["M7b Clarify & project inspection<br/>Python"]
   M8["M8 Web UI"]
   M9["M9 Fault scenarios, eval, E2E"]
 
@@ -25,14 +26,15 @@ flowchart LR
   M3 --> M5
   M2 --> M6
   M5 --> M6
-  M6 --> M7
+  M6 --> M7a
+  M7a --> M7b
   M6 --> M8
   M4 --> M9
-  M7 --> M9
+  M7b --> M9
   M8 --> M9
 ```
 
-M1 and M2 share no code and can run in parallel. M3 and M4 can overlap once M3's lifecycle tools exist.
+M1 and M2 share no code and can run in parallel. M3 and M4 can overlap once M3's lifecycle tools exist. M7 was split on 2026-10-18: M7a lands self-healing with model tiers first; M7b's conversational parts can then be tuned alongside M8's web UI.
 
 ## Milestones
 
@@ -44,7 +46,8 @@ M1 and M2 share no code and can run in parallel. M3 and M4 can overlap once M3's
 | M4 | Artifacts & builds | Nexus download with local credentials; snapshot → timestamped version; workdir build; `java-springboot` builder template; image cache by artifact sha256 | A sample Spring Boot app builds from release, snapshot, and workdir sources; a second build hits the cache |
 | M5 | Runner ↔ platform link | Runner Hub (Python, WebSocket); tool RPC protocol; static-token auth; Runner reconnect | Platform calls each Runner tool over WSS; Runner survives a hub restart |
 | M6 | Deterministic orchestrator | LangGraph state machine with Postgres checkpointer; approval interrupt; verify L1–L4 plus stability window; ~10 T0 rules; budgets; oscillation detection; escalation | A registered sample cluster reaches "healthy" with no LLM; T0 rules fix port conflict and OOM scenarios |
-| M7 | LLM nodes & routing | LiteLLM config (Ollama + Bedrock); tier and node maps; complexity scorer; capability tags; Pydantic output validation with tier escalation; clarify node; T1/T2 diagnosis; unregistered-project inspection; an environment-key allowlist for model-written patches: a patch may set only keys the service already declares (descriptor `runtime.env.required` and `defaults`, `requires[].bind` keys, middleware template `env`), and an undeclared key or an agent-loading value such as `-javaagent:` or `-agentpath:` goes to human approval instead of being applied (the M6 gate's `LD_*`/`DYLD_*` denylist cannot name every code-loading variable, e.g. `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`, `PYTHONPATH`) | Clarify produces a valid ClusterSpec from a prompt; T1/T2 fix scenarios no T0 rule covers; a model patch setting an undeclared key or `-javaagent:` is held for approval |
+| M7a | Model routing & T1/T2 fixes | LiteLLM model gateway with tiers in `platform/models.yaml` (local Ollama for the POC, Bedrock by configuration); rule-based tier choice (cross-service evidence, unknown signatures, failed attempts); Pydantic-validated answers retried once, then a tier up; T1/T2 diagnosis for failures no T0 rule covers; an environment-key allowlist for model-written patches: a patch may set only keys the service already declares (descriptor `runtime.env.required` and `defaults`, `requires[].bind` keys, middleware template `env`), and an undeclared key or an agent-loading value such as `-javaagent:` or `-agentpath:` goes to human approval instead of being applied (the M6 gate's `LD_*`/`DYLD_*` denylist cannot name every code-loading variable, e.g. `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`, `PYTHONPATH`) | With local models on real Docker: a single-service typo fixed on the small tier, a cross-service typo on the large tier, and a fix setting an undeclared key held for approval |
+| M7b | Clarify & project inspection | Clarify node: natural-language purpose → valid ClusterSpec, asking about every gap the generator reports; unregistered-project inspection drafting a `.cagent/service.yaml` from pom, gradle, package.json, go.mod, Dockerfile | Clarify produces a valid ClusterSpec from a prompt; an unregistered sample project gets a descriptor that builds and runs |
 | M8 | Web UI | Chat, YAML diff approval, status panel, live logs, escalation view | A user runs the full flow from the browser |
 | M9 | Fault scenarios, eval, E2E | Fault-scenario library; per-tier eval harness; POC compose under `deploy/poc`; two real projects end to end | POC success criteria in the design doc are met |
 
