@@ -7,8 +7,9 @@ The generator reports every gap at once (design 6.3); Clarify asks about one at 
 from dataclasses import asdict, dataclass
 from typing import Any
 
-# Gaps a person can close by answering a question. unregistered and bind_render cannot be:
-# the first needs a descriptor, the second is a catalog bug.
+# Gaps a person can close by answering a question. unregistered, bind_render, and
+# unsupported_init cannot be: the first needs a descriptor, the second is a catalog bug, the
+# third asks a template for init work it cannot do (M7c).
 ANSWERABLE = frozenset(
     {
         "unknown_template",
