@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict
 
 from cagent.catalog import Catalog
 from cagent.llm import Router
-from cagent.patches import within_environment
+from cagent.patches import init_services, within_environment
 from cagent.rules import Problem
 from cagent.spec import ClusterSpec
 
@@ -175,9 +175,14 @@ def _jvm_token_allowed(token: str) -> bool:
     return prop is not None and prop.group(1) in _SAFE_PROPERTIES
 
 
-def judge(patch: list[dict[str, Any]], declared: dict[str, set[str]]) -> tuple[str, list[str]]:
-    """Classify a model patch as apply, approve, or reject, with the reasons."""
-    if not within_environment(patch):
+def judge(
+    patch: list[dict[str, Any]],
+    declared: dict[str, set[str]],
+    protected: frozenset[str] = frozenset(),
+) -> tuple[str, list[str]]:
+    """Classify a model patch as apply, approve, or reject, with the reasons. protected names
+    the init services, which no patch may change."""
+    if not within_environment(patch, protected):
         return "reject", ["changes something outside the environment gate"]
     reasons = []
     for op in patch:
@@ -263,5 +268,5 @@ async def propose(
     patch = [op.model_dump(exclude={"value"} if op.op == "remove" else set()) for op in diag.patch]
     if not patch:
         return Proposal(tier, problem.signature, diag.root_cause, [], "give_up")
-    verdict, reasons = judge(patch, declared)
+    verdict, reasons = judge(patch, declared, init_services(compose))
     return Proposal(tier, problem.signature, diag.root_cause, patch, verdict, reasons)

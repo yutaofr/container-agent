@@ -41,7 +41,7 @@ from cagent.gaps import ANSWERABLE, Gap
 from cagent.generate import GenerationError, generate, to_yaml
 from cagent.hub import ToolResult
 from cagent.llm import ModelUnavailable, Router
-from cagent.patches import apply, fingerprint, within_environment
+from cagent.patches import apply, fingerprint, init_services, within_environment
 from cagent.rules import (
     Problem,
     first_fix,
@@ -550,7 +550,7 @@ class Orchestrator:
                 exhausted.append(p.signature)
                 continue
             fix = first_fix(p, compose)
-            if fix is None or not within_environment(fix.patch):
+            if fix is None or not within_environment(fix.patch, init_services(compose)):
                 unruled.append(p)
                 continue
             return self._apply_fix(state, p.signature, asdict(fix), fix.patch)
