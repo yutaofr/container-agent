@@ -5,8 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/yutaofr/container-agent/runner/internal/initscripts"
 )
 
 // project creates a working directory with a descriptor using build and output.
@@ -188,5 +191,32 @@ func TestDockerInputsStayInsideTheProject(t *testing.T) {
 	d.Sources.Workdir.Dockerfile = "missing/Dockerfile"
 	if _, _, err := DockerInputs(dir, d); err == nil {
 		t.Error("missing Dockerfile accepted")
+	}
+}
+
+func TestDescriptorListsItsInitScriptsInOrder(t *testing.T) {
+	d, err := ParseDescriptor([]byte("name: demo\nsources:\n  workdir: {build: make, output: app.jar}\n"+
+		"requires:\n  - capability: mysql\n    init: {scripts: [db/schema.sql, db/seed.sql]}\n"+
+		"  - capability: kafka\n    init: {topics: [{name: orders}]}\n"+
+		"  - capability: cassandra\n    init: {scripts: [cql/schema.cql]}\n"), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := d.Scripts()
+	want := []initscripts.Script{
+		{Capability: "mysql", Path: "db/schema.sql"},
+		{Capability: "mysql", Path: "db/seed.sql"},
+		{Capability: "cassandra", Path: "cql/schema.cql"},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("scripts %v, want %v", got, want)
+	}
+}
+
+func TestDescriptorRefusesAScriptOutsideTheProject(t *testing.T) {
+	_, err := ParseDescriptor([]byte("name: demo\nsources:\n  workdir: {build: make, output: app.jar}\n"+
+		"requires:\n  - capability: mysql\n    init: {scripts: [../other/schema.sql]}\n"), "demo")
+	if err == nil || !strings.Contains(err.Error(), "../other/schema.sql") {
+		t.Errorf("got %v", err)
 	}
 }
