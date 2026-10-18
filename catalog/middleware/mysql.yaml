@@ -22,3 +22,10 @@ healthcheck:
 presets:
   tiny: { mem_limit: 512m, cpus: 0.5 }
   standard: { mem_limit: 1g, cpus: 1.0 }
+# Init scripts run as root in the app database; cagent.init records each script by content.
+init:
+  scripts:
+    suffix: .sql
+    run: mysql -h{{host}} -uroot -proot {{db}} < "$file"
+    marked: mysql -h{{host}} -uroot -proot -N -e "SELECT 1 FROM cagent.init WHERE sha='$sha'" 2>/dev/null | grep -q 1
+    mark: mysql -h{{host}} -uroot -proot -e "CREATE DATABASE IF NOT EXISTS cagent; CREATE TABLE IF NOT EXISTS cagent.init (sha CHAR(64) PRIMARY KEY); INSERT INTO cagent.init VALUES ('$sha')"

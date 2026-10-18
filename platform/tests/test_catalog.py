@@ -17,7 +17,7 @@ def write_template(root: Path, name: str, text: str) -> None:
 
 
 def test_shipped_catalog_loads(catalog):
-    assert set(catalog.middleware) == {"mysql", "redis", "kafka"}
+    assert set(catalog.middleware) == {"mysql", "redis", "kafka", "cassandra"}
     assert set(catalog.services) == {"order-service"}
     assert catalog.middleware["kafka"].provides.capability == "kafka"
     assert catalog.services["order-service"].requires[0].version == ">=8.0"

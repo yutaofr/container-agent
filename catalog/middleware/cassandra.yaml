@@ -1,0 +1,28 @@
+name: cassandra
+kind: middleware
+provides: { capability: cassandra }
+image: "cassandra:{version}"
+versions: ["4.1", "5.0"]
+default_version: "5.0"
+port: 9042
+# Single node; drivers name its datacenter (e.g. spring.cassandra.local-datacenter).
+connection:
+  datacenter: datacenter1
+env:
+  MAX_HEAP_SIZE: 512M
+  HEAP_NEWSIZE: 128M
+  JVM_EXTRA_OPTS: -Dcassandra.skip_wait_for_gossip_to_settle=0
+healthcheck:
+  cmd: ["CMD-SHELL", "cqlsh -e 'describe keyspaces' > /dev/null"]
+presets:
+  tiny: { mem_limit: 2g, cpus: 1.0 }
+  standard: { mem_limit: 4g, cpus: 2.0 }
+# cqlsh exits non-zero on a failed statement; cagent.init records each script by content.
+init:
+  keyspaces:
+    run: cqlsh {{host}} -e "CREATE KEYSPACE IF NOT EXISTS {{keyspace}} WITH replication = {'class':'SimpleStrategy','replication_factor':1}"
+  scripts:
+    suffix: .cql
+    run: cqlsh {{host}} -f "$file"
+    marked: cqlsh {{host}} -e "SELECT sha FROM cagent.init WHERE sha='$sha'" 2>/dev/null | grep -q "$sha"
+    mark: cqlsh {{host}} -e "CREATE KEYSPACE IF NOT EXISTS cagent WITH replication = {'class':'SimpleStrategy','replication_factor':1}; CREATE TABLE IF NOT EXISTS cagent.init (sha text PRIMARY KEY); INSERT INTO cagent.init (sha) VALUES ('$sha')"

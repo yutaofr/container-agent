@@ -24,3 +24,8 @@ healthcheck:
 presets:
   tiny: { mem_limit: 768m, cpus: 0.5 }
   standard: { mem_limit: 1536m, cpus: 1.0 }
+# --if-not-exists makes topic creation idempotent; no marker needed. kafka-topics.sh is a JVM.
+init:
+  mem_limit: 512m
+  topics:
+    run: /opt/kafka/bin/kafka-topics.sh --bootstrap-server {{host}}:9092 --create --if-not-exists --topic {{topic}} --partitions {{partitions}} --replication-factor 1
