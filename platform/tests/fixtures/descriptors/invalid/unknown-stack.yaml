@@ -1,0 +1,6 @@
+name: demo
+kind: app
+stack: node
+sources:
+  workdir: { build: "npm ci", output: "dist/app.js" }
+runtime: {}

@@ -1,0 +1,9 @@
+name: demo
+kind: app
+stack: dockerfile
+sources:
+  workdir:
+    build: "mvn -q -pl api -am package -DskipTests"
+    dockerfile: api/Dockerfile
+    context: api
+runtime: {}

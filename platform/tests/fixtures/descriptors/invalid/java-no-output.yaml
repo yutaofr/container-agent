@@ -1,0 +1,6 @@
+name: demo
+kind: app
+stack: java-springboot
+sources:
+  workdir: { build: "mvn -q package" }
+runtime: {}

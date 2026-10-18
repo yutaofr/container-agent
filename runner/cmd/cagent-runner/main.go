@@ -373,7 +373,7 @@ func runBuild(args []string, stdout, stderr io.Writer, d deps) int {
 		if err != nil {
 			return usageErr(err.Error())
 		}
-		desc, err := workdir.LoadDescriptor(abs)
+		desc, err := workdir.LoadDescriptor(abs, *service)
 		if err != nil {
 			return usageErr(err.Error())
 		}

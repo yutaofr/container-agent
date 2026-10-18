@@ -26,7 +26,7 @@ func project(t *testing.T, build, output string) string {
 
 func build(t *testing.T, dir string) (string, error) {
 	t.Helper()
-	d, err := LoadDescriptor(dir)
+	d, err := LoadDescriptor(dir, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,10 +84,109 @@ func TestLoadDescriptorNeedsWorkdirSource(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, DescriptorPath), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadDescriptor(dir); err == nil || !strings.Contains(err.Error(), "needs build and output") {
+	if _, err := LoadDescriptor(dir, "demo"); err == nil || !strings.Contains(err.Error(), "sources.workdir is missing") {
 		t.Errorf("got %v", err)
 	}
-	if _, err := LoadDescriptor(t.TempDir()); err == nil {
+	if _, err := LoadDescriptor(t.TempDir(), "demo"); err == nil {
 		t.Error("missing descriptor accepted")
+	}
+}
+
+// write creates dir/rel with body, making parent directories.
+func write(t *testing.T, dir, rel, body string) {
+	t.Helper()
+	path := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadDescriptorPrefersThePerServiceFile(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, DescriptorPath, "name: other\nstack: dockerfile\nsources:\n  workdir: { dockerfile: Dockerfile }\n")
+	write(t, dir, ServicesDir+"/api.yaml", "name: api\nstack: dockerfile\nsources:\n  workdir: { dockerfile: api/Dockerfile }\n")
+	d, err := LoadDescriptor(dir, "api")
+	if err != nil || d.Sources.Workdir.Dockerfile != "api/Dockerfile" {
+		t.Fatalf("got %+v, %v", d, err)
+	}
+	// Without a per-service file the project's single descriptor is used, and must name the service.
+	if _, err := LoadDescriptor(dir, "web"); err == nil || !strings.Contains(err.Error(), `names "other", not "web"`) {
+		t.Errorf("got %v", err)
+	}
+}
+
+func TestLoadDescriptorRejectsBadServiceNames(t *testing.T) {
+	for _, svc := range []string{"", "../x", "a/b", "Api"} {
+		if _, err := LoadDescriptor(t.TempDir(), svc); err == nil || !strings.Contains(err.Error(), "invalid service") {
+			t.Errorf("%q: got %v", svc, err)
+		}
+	}
+}
+
+// The same fixture descriptors are checked by the platform's ServiceDescriptor tests, so the
+// Runner and the platform agree on which workdir sources are valid.
+func TestSharedDescriptorFixtures(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "platform", "tests", "fixtures", "descriptors")
+	for _, kind := range []string{"valid", "invalid"} {
+		paths, err := filepath.Glob(filepath.Join(root, kind, "*.yaml"))
+		if err != nil || len(paths) == 0 {
+			t.Fatalf("no %s fixtures: %v", kind, err)
+		}
+		for _, path := range paths {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ParseDescriptor(data, "demo")
+			if (err == nil) != (kind == "valid") {
+				t.Errorf("%s: err = %v", path, err)
+			}
+		}
+	}
+}
+
+func TestDockerfileStackRunsTheOptionalBuildFirst(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "api/Dockerfile", "FROM busybox\n")
+	write(t, dir, DescriptorPath, "name: demo\nstack: dockerfile\nsources:\n  workdir:\n"+
+		"    build: 'mkdir -p api/out && touch api/out/built'\n    dockerfile: api/Dockerfile\n    context: api\n")
+	d, err := LoadDescriptor(dir, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact, err := Build(context.Background(), dir, d); err != nil || artifact != "" {
+		t.Fatalf("artifact %q, err %v", artifact, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "api", "out", "built")); err != nil {
+		t.Error("build command did not run")
+	}
+	df, ctxDir, err := DockerInputs(dir, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	real, _ := filepath.EvalSymlinks(dir)
+	if df != filepath.Join(real, "api", "Dockerfile") || ctxDir != filepath.Join(real, "api") {
+		t.Errorf("dockerfile %s, context %s", df, ctxDir)
+	}
+}
+
+func TestDockerInputsStayInsideTheProject(t *testing.T) {
+	outside := t.TempDir()
+	write(t, outside, "Dockerfile", "FROM busybox\n")
+	dir := t.TempDir()
+	if err := os.Symlink(filepath.Join(outside, "Dockerfile"), filepath.Join(dir, "Dockerfile")); err != nil {
+		t.Fatal(err)
+	}
+	d := Descriptor{Name: "demo", Stack: StackDockerfile}
+	d.Sources.Workdir = &Workdir{Dockerfile: "Dockerfile", Context: "."}
+	if _, _, err := DockerInputs(dir, d); err == nil || !strings.Contains(err.Error(), "outside") {
+		t.Errorf("symlinked Dockerfile: got %v", err)
+	}
+	d.Sources.Workdir.Dockerfile = "missing/Dockerfile"
+	if _, _, err := DockerInputs(dir, d); err == nil {
+		t.Error("missing Dockerfile accepted")
 	}
 }
