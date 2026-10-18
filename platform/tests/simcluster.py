@@ -25,6 +25,8 @@ class SimCluster:
         requires_env: dict[str, dict[str, str]] | None = None,
         errors: dict[str, str] | None = None,
         projects: dict[str, dict[str, Any]] | None = None,
+        failing_init: dict[str, str] | None = None,
+        init_fails_quietly: bool = False,
     ):
         self.occupied = occupied_ports or set()
         self.needs_mb = needs_mb or {}  # below this mem_limit the service is OOM-killed
@@ -36,6 +38,10 @@ class SimCluster:
         self.errors = errors or {}
         # workdir -> what inspect reports; tests add a saved descriptor to its "files"
         self.projects = projects or {}
+        # init service -> the last line it logs before exiting 1. up fails naming it, as
+        # docker compose does, unless init_fails_quietly: then only snapshots show it.
+        self.failing_init = failing_init or {}
+        self.init_fails_quietly = init_fails_quietly
         self.compose: dict[str, Any] | None = None
         self.calls: list[str] = []
         self.builds: list[dict[str, Any]] = []
@@ -73,7 +79,16 @@ class SimCluster:
     def _up(self, p: dict[str, Any]) -> ToolResult:
         self.compose = yaml.safe_load(p["compose"])
         self._starting = self.starting_snapshots
+        failed = [n for n in sorted(self.compose["services"]) if n in self.failing_init]
+        if failed and not self.init_fails_quietly:
+            return ToolResult(
+                1, None, f'service "{failed[0]}" didn\'t complete successfully: exit 1'
+            )
         return ToolResult(0, {"project": f"cagent-{p['name']}"})
+
+    @staticmethod
+    def _is_init(svc: dict[str, Any]) -> bool:
+        return (svc.get("labels") or {}).get("cagent.role") == "init"
 
     def _service(self, name: str, svc: dict[str, Any]) -> dict[str, Any]:
         s = {
@@ -87,7 +102,13 @@ class SimCluster:
             "signatures": [],
         }
         need, limit = self.needs_mb.get(name), to_mb(svc.get("mem_limit", "0"))
-        if need and (limit is None or limit < need):
+        if self._is_init(svc):
+            s.update(role="init", state="exited")
+            if line := self.failing_init.get(name):
+                s.update(
+                    exit_code=1, error_lines=[line], tail=[line], signatures=[f"exit:1@{name}"]
+                )
+        elif need and (limit is None or limit < need):
             s.update(
                 state="exited", exit_code=137, oom_killed=True, signatures=[f"oom:killed@{name}"]
             )
@@ -116,6 +137,10 @@ class SimCluster:
 
     def _verify(self, p: dict[str, Any]) -> ToolResult:
         services = [self._service(n, s) for n, s in sorted(self.compose["services"].items())]
-        ok = all(s["state"] == "running" and s.get("health") in (None, "healthy") for s in services)
+        ok = all(
+            (s["state"] == "running" and s.get("health") in (None, "healthy"))
+            or (s.get("role") == "init" and s["exit_code"] == 0)
+            for s in services
+        )
         reached = ("L3" if p.get("probes") else "L2") if ok else ""
         return ToolResult(0 if ok else 1, {"passed": ok, "reached": reached, "results": []})
