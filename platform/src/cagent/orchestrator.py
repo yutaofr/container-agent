@@ -3,13 +3,17 @@
     generate → validate → approve ⏸ → build → up → watch → stabilize → done
                   ↑                              │        │
                   └────────── diagnose ←─────────┴────────┘
-                                 │ no rule / budget / oscillation
+                     (T0 rules, then model tiers)  │ undeclared env key / JVM agent
+                                 │                 ▼
+                                 │          approve_patch ⏸
+                                 │ no rule / no fix / budget / oscillation
                                  ▼
                              escalate ⏸
 
-Only `approve` and `escalate` wait for a person, via LangGraph interrupts; they do nothing
-else, because a node that called interrupt() runs again from the top when resumed. All
-cluster work goes through the Runner's tools, so the orchestrator never touches Docker.
+Only `approve`, `approve_patch`, and `escalate` wait for a person, via LangGraph interrupts;
+they do nothing before interrupting, because a node that called interrupt() runs again from
+the top when resumed. All cluster work goes through the Runner's tools, so the orchestrator
+never touches Docker.
 """
 
 import asyncio
@@ -19,12 +23,16 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol, TypedDict
 
+from jsonpatch import JsonPatchException
+from jsonpointer import JsonPointerException
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from cagent.catalog import Catalog
+from cagent.diagnose import declared_env, propose
 from cagent.generate import GenerationError, generate, to_yaml
 from cagent.hub import ToolResult
+from cagent.llm import ModelUnavailable, Router
 from cagent.patches import apply, fingerprint, within_environment
 from cagent.rules import (
     Problem,
@@ -66,6 +74,10 @@ class State(TypedDict, total=False):
     built: bool
     findings: list[dict[str, Any]]
     problems: list[dict[str, Any]]
+    snapshot: dict[str, Any]  # evidence for the model tiers
+    proposal: dict[str, Any] | None  # a model fix waiting for approval
+    rejected: list[dict[str, Any]]  # model fixes that could not be used
+    unchecked: dict[str, Any] | None  # a model fix applied but not yet validated
     restarts: dict[str, int]
     attempts: dict[str, int]
     rounds: int
@@ -99,9 +111,11 @@ class Orchestrator:
         settings: Settings | None = None,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
         clock: Callable[[], float] = time.time,
+        router: Router | None = None,
     ):
+        """Without a router the orchestrator stays deterministic: T0 rules only."""
         self.hub, self.catalog, self.settings = hub, catalog, settings or Settings()
-        self.sleep, self.clock = sleep, clock
+        self.sleep, self.clock, self.router = sleep, clock, router
         self.graph = self._graph().compile(checkpointer=checkpointer)
 
     # --- public API -------------------------------------------------------------------------
@@ -117,6 +131,10 @@ class Orchestrator:
             "built": False,
             "findings": [],
             "problems": [],
+            "snapshot": {"services": []},
+            "proposal": None,
+            "rejected": [],
+            "unchecked": None,
             "restarts": {},
             "attempts": {},
             "rounds": 0,
@@ -161,6 +179,7 @@ class Orchestrator:
             "watch",
             "stabilize",
             "diagnose",
+            "approve_patch",
             "escalate",
             "done",
         ):
@@ -188,16 +207,35 @@ class Orchestrator:
             state, "validate", compose=to_yaml(state["compose"]), allow=state["allow"]
         )
         if res.exit_code not in (0, 1) or not isinstance(res.output, dict):
+            if unchecked := state.get("unchecked"):
+                # A model patch passed the gate but broke the document: undo it and let the
+                # next attempt start a tier higher, instead of escalating.
+                return Command(
+                    update={
+                        "compose": unchecked["previous"],
+                        "fixes": state["fixes"][:-1],
+                        "unchecked": None,
+                        "rejected": [
+                            *state["rejected"],
+                            {**unchecked["fix"], "why": f"invalid compose: {res.stderr[-300:]}"},
+                        ],
+                    },
+                    goto="diagnose",
+                )
             return self._escalation("runner_error", step="validate", stderr=res.stderr)
+        checked = {"unchecked": None}
         if problems := problems_from_validate(res.output):
-            return Command(update={"problems": [asdict(p) for p in problems]}, goto="diagnose")
+            return Command(
+                update={**checked, "problems": [asdict(p) for p in problems]}, goto="diagnose"
+            )
         if res.output.get("findings"):
             return Command(
-                update={"findings": res.output["findings"], "approved": False}, goto="approve"
+                update={**checked, "findings": res.output["findings"], "approved": False},
+                goto="approve",
             )
         if not state["approved"]:
-            return Command(update={"findings": []}, goto="approve")
-        return Command(goto="up" if state["built"] else "build")
+            return Command(update={**checked, "findings": []}, goto="approve")
+        return Command(update=checked, goto="up" if state["built"] else "build")
 
     async def _step_approve(self, state: State) -> Command:
         decision = interrupt(
@@ -286,7 +324,10 @@ class Orchestrator:
         while True:
             snap = await self._snapshot(state)
             if problems := problems_from_snapshot(snap):
-                return Command(update={"problems": [asdict(p) for p in problems]}, goto="diagnose")
+                return Command(
+                    update={"problems": [asdict(p) for p in problems], "snapshot": snap},
+                    goto="diagnose",
+                )
             services = snap.get("services", [])
             settled = services and all(
                 s["state"] == "running" and s.get("health") != "starting" for s in services
@@ -311,44 +352,139 @@ class Orchestrator:
             if s.get("restart_count", 0) != state["restarts"].get(s["service"], 0):
                 problems.append(Problem("restart:unstable", s["service"]))
         if problems:
-            return Command(update={"problems": [asdict(p) for p in problems]}, goto="diagnose")
+            return Command(
+                update={"problems": [asdict(p) for p in problems], "snapshot": snap},
+                goto="diagnose",
+            )
         rep = (await self._call(state, "verify", probes=self._probes(state))).output
         if not (rep and rep.get("passed")):
             return self._escalation("verify_failed", report=rep)
         return Command(update={"report": rep}, goto="done")
 
     async def _step_diagnose(self, state: State) -> Command:
-        """Apply the first T0 fix the budgets allow; escalate when none applies."""
+        """Apply the first T0 fix the budgets allow; for problems no rule covers, ask the
+        model tiers when a router is configured; escalate when neither helps."""
         compose = state["compose"]
         problems = upstream_first([Problem(**p) for p in state["problems"]], compose)
         if state["rounds"] >= self.settings.max_rounds or self.clock() > state["deadline"]:
             return self._escalation("budget", problems=[p.signature for p in problems])
-        exhausted = []
+        exhausted, unruled = [], []
         for p in problems:
             if state["attempts"].get(p.signature, 0) >= self.settings.max_attempts_per_signature:
                 exhausted.append(p.signature)
                 continue
             fix = first_fix(p, compose)
             if fix is None or not within_environment(fix.patch):
+                unruled.append(p)
                 continue
-            patched = apply(compose, fix.patch)
-            if fingerprint(patched) in state["seen"]:
-                return self._escalation("oscillation", fix=asdict(fix))
-            return Command(
-                update={
-                    "compose": patched,
-                    "seen": [*state["seen"], fingerprint(patched)],
-                    "attempts": {
-                        **state["attempts"],
-                        p.signature: state["attempts"].get(p.signature, 0) + 1,
-                    },
-                    "rounds": state["rounds"] + 1,
-                    "fixes": [*state["fixes"], asdict(fix)],
-                },
-                goto="validate",
-            )
+            return self._apply_fix(state, p.signature, asdict(fix), fix.patch)
+        if unruled and self.router is not None:
+            return await self._ask_model(state, unruled[0])
         reason = "budget" if exhausted else "no_rule"
         return self._escalation(reason, problems=[p.signature for p in problems])
+
+    def _apply_fix(
+        self, state: State, signature: str, fix: dict[str, Any], patch: list[dict[str, Any]]
+    ) -> Command:
+        try:
+            patched = apply(state["compose"], patch)
+        except (JsonPatchException, JsonPointerException) as e:
+            return self._failed_attempt(state, signature, fix, f"patch does not apply: {e}")
+        if fingerprint(patched) in state["seen"]:
+            if fix["rule"].startswith("llm:"):
+                # A model repeating a state already tried is stuck, not oscillating: let the
+                # next attempt start a tier higher, within the per-signature budget.
+                return self._failed_attempt(state, signature, fix, "repeats a state already tried")
+            return self._escalation("oscillation", fix=fix)
+        return Command(
+            update={
+                "compose": patched,
+                "seen": [*state["seen"], fingerprint(patched)],
+                "attempts": {
+                    **state["attempts"],
+                    signature: state["attempts"].get(signature, 0) + 1,
+                },
+                "rounds": state["rounds"] + 1,
+                "fixes": [*state["fixes"], fix],
+                "proposal": None,
+                "unchecked": (
+                    {"signature": signature, "fix": fix, "previous": state["compose"]}
+                    if fix["rule"].startswith("llm:")
+                    else None
+                ),
+            },
+            goto="validate",
+        )
+
+    def _failed_attempt(
+        self, state: State, signature: str, fix: dict[str, Any], why: str
+    ) -> Command:
+        """Count a model fix that could not be used; the next try starts a tier higher."""
+        return Command(
+            update={
+                "attempts": {
+                    **state["attempts"],
+                    signature: state["attempts"].get(signature, 0) + 1,
+                },
+                "rounds": state["rounds"] + 1,
+                "rejected": [*state["rejected"], {**fix, "why": why}],
+            },
+            goto="diagnose",
+        )
+
+    async def _ask_model(self, state: State, problem: Problem) -> Command:
+        spec = ClusterSpec.model_validate(state["spec"])
+        try:
+            proposal = await propose(
+                self.router,
+                problem,
+                state["snapshot"],
+                state["compose"],
+                declared_env(spec, self.catalog),
+                state["attempts"].get(problem.signature, 0),
+            )
+        except ModelUnavailable as e:
+            return self._escalation("model_unavailable", problem=problem.signature, detail=str(e))
+        fix = {
+            "rule": f"llm:{proposal.tier}",
+            "signature": proposal.signature,
+            "patch": proposal.patch,
+            "reason": proposal.root_cause,
+        }
+        if proposal.verdict == "give_up":
+            return self._escalation(
+                "no_fix",
+                problem=problem.signature,
+                root_cause=proposal.root_cause,
+                tier=proposal.tier,
+            )
+        if proposal.verdict == "reject":
+            return self._failed_attempt(
+                state, problem.signature, fix, f"{proposal.tier}: {'; '.join(proposal.reasons)}"
+            )
+        if proposal.verdict == "approve":
+            return Command(
+                update={"proposal": {**asdict(proposal), "fix": fix}}, goto="approve_patch"
+            )
+        return self._apply_fix(state, problem.signature, fix, proposal.patch)
+
+    async def _step_approve_patch(self, state: State) -> Command:
+        p = state["proposal"]
+        decision = interrupt(
+            {
+                "kind": "patch_approval",
+                "signature": p["signature"],
+                "tier": p["tier"],
+                "root_cause": p["root_cause"],
+                "patch": p["patch"],
+                "reasons": p["reasons"],
+            }
+        )
+        if not decision.get("approve"):
+            return self._escalation(
+                "patch_rejected", problem=p["signature"], root_cause=p["root_cause"]
+            )
+        return self._apply_fix(state, p["signature"], p["fix"], p["patch"])
 
     async def _step_escalate(self, state: State) -> Command:
         decision = interrupt(
