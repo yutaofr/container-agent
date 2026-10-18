@@ -4,8 +4,9 @@ The model sees the failing service's redacted evidence and its compose config (w
 values masked), proposes a JSON Patch, and the patch is judged before anything changes:
 
   apply    inside the environment gate, and only declared environment keys
-  approve  inside the gate, but sets an undeclared key, or a value that loads a JVM agent or
-           runs a command on JVM failure: a person decides
+  approve  inside the gate, but sets an undeclared key, a JVM option outside the tuning
+           allow-list, or a value that loads a JVM agent or runs a command on JVM failure:
+           a person decides
   reject   outside the gate: never applied; the next attempt moves up a tier
 
 Declared keys come from the service's own definition (descriptor env, bind keys, template
@@ -69,6 +70,23 @@ _SECRET_KEY = re.compile(r"(?i)password|passwd|pwd|secret|token|api_?key|access_
 # JVM options that load code or run a shell command: agents, and the OnError/OnOutOfMemoryError
 # hooks, which execute their argument when the JVM crashes or runs out of memory.
 _AGENT_VALUE = re.compile(r"(?i)-(javaagent|agentpath|agentlib)[:=]|-XX:\+?On(OutOfMemory)?Error\b")
+# Keys whose values the JVM or a launcher script reads as JVM options (JAVA_OPTS,
+# JAVA_TOOL_OPTIONS, KAFKA_HEAP_OPTS, ...). Their values are checked token by token against
+# an allow-list; options anywhere else still meet the narrower _AGENT_VALUE check.
+_JVM_OPTS_KEY = re.compile(r"(?i)(OPTS|OPTIONS)$")
+# The allow-list: heap and stack sizes; -XX boolean flags and -XX flags with a number (a
+# path value such as -XX:Flags=<file> reads options from a file), never the On* hooks; and
+# -D for a few named properties with plain values. Other properties stay out by name, not by
+# prefix: com.sun.management.jmxremote.*, logging.config and spring.config.import all load
+# or expose code without touching the java.* namespace.
+_JVM_TUNING = re.compile(
+    r"-X(ms|mx|mn|ss)\d+[kmg]?|-XX:[+-](?!On)\w+|-XX:(?!On)\w+=\d+(\.\d+)?[kmg%]?",
+    re.ASCII | re.IGNORECASE,
+)
+_JVM_PROPERTY = re.compile(r"-D([\w.-]+)=[\w.,-]*", re.ASCII)
+_SAFE_PROPERTIES = frozenset(
+    {"spring.profiles.active", "file.encoding", "user.timezone", "server.port"}
+)
 _ENV_KEY_PATH = re.compile(r"/services/([^/]+)/environment/([^/]+)")
 _ENV_ROOT_PATH = re.compile(r"/services/([^/]+)/environment")
 _CROSS_KINDS = {"conn:refused", "dns:unresolved", "auth:denied"}
@@ -120,28 +138,41 @@ def prompt_view(compose: dict[str, Any]) -> dict[str, Any]:
     return _unescape_compose(mask_secrets(compose))
 
 
-def _env_keys(op: dict[str, Any]) -> list[tuple[str, str]]:
-    """(service, key) pairs an operation sets."""
+def _env_items(op: dict[str, Any]) -> list[tuple[str, str, str | None]]:
+    """(service, key, value) triples an operation sets, in every environment shape."""
     path = op["path"]
+    value = op.get("value")
     if m := _ENV_KEY_PATH.fullmatch(path):
         key = m.group(2).replace("~1", "/").replace("~0", "~")
         if key.isdigit() or key == "-":  # list-form environment: "KEY=value"
-            value = op.get("value")
-            return [(m.group(1), str(value).partition("=")[0])] if value is not None else []
-        return [(m.group(1), key)]
-    if (m := _ENV_ROOT_PATH.fullmatch(path)) and isinstance(op.get("value"), dict):
-        return [(m.group(1), k) for k in op["value"]]
-    if m and isinstance(op.get("value"), list):
-        return [(m.group(1), str(e).partition("=")[0]) for e in op["value"]]
+            if value is None:
+                return []
+            k, _, v = str(value).partition("=")
+            return [(m.group(1), k, v)]
+        return [(m.group(1), key, None if value is None else str(value))]
+    if (m := _ENV_ROOT_PATH.fullmatch(path)) and isinstance(value, dict):
+        return [(m.group(1), k, None if v is None else str(v)) for k, v in value.items()]
+    if m and isinstance(value, list):
+        return [(m.group(1), *_split_entry(str(e))) for e in value]
     return []
 
 
-def _values(value: Any) -> list[str]:
-    if isinstance(value, dict):
-        return [str(v) for v in value.values()]
-    if isinstance(value, list):
-        return [str(v) for v in value]
-    return [] if value is None else [str(value)]
+def _split_entry(entry: str) -> tuple[str, str]:
+    key, _, value = entry.partition("=")
+    return key, value
+
+
+def _jvm_token_allowed(token: str) -> bool:
+    """True for a JVM option that only tunes memory or GC, or sets a known plain property.
+
+    Everything else - agents, debuggers, boot classpath, class-loader properties,
+    @argfiles, -XX flags that read files or run hooks, shell metacharacters - is held
+    for a person to approve.
+    """
+    if _JVM_TUNING.fullmatch(token):
+        return True
+    prop = _JVM_PROPERTY.fullmatch(token)
+    return prop is not None and prop.group(1) in _SAFE_PROPERTIES
 
 
 def judge(patch: list[dict[str, Any]], declared: dict[str, set[str]]) -> tuple[str, list[str]]:
@@ -152,16 +183,20 @@ def judge(patch: list[dict[str, Any]], declared: dict[str, set[str]]) -> tuple[s
     for op in patch:
         if op["op"] == "remove":
             continue
-        for service, key in _env_keys(op):
+        for service, key, value in _env_items(op):
             if key not in declared.get(service, set()):
                 reasons.append(f"{service}: {key} is not a declared environment key")
-        if op["path"].split("/")[3:4] == ["environment"] and any(
-            _AGENT_VALUE.search(v) for v in _values(op.get("value"))
-        ):
-            reasons.append(
-                "a value loads a JVM agent or command hook "
-                "(-javaagent, -agentpath, -agentlib, -XX:OnError, -XX:OnOutOfMemoryError)"
-            )
+            if value is None:
+                continue
+            if _JVM_OPTS_KEY.search(key):
+                held = [t for t in value.split() if not _jvm_token_allowed(t)]
+                if held:
+                    reasons.append(f"{service}: {key} sets JVM option(s) {' '.join(held)}")
+            elif _AGENT_VALUE.search(value):
+                reasons.append(
+                    f"{service}: {key} loads a JVM agent or command hook "
+                    "(-javaagent, -agentpath, -agentlib, -XX:OnError, -XX:OnOutOfMemoryError)"
+                )
     return ("approve", reasons) if reasons else ("apply", [])
 
 
