@@ -171,6 +171,7 @@ Measured on a 24 GB Apple Silicon Mac, Docker 29, local Ollama, 2026-10-18.
 - **A second `up` reruns a completed init container.** Confirmed with busybox: same configuration, the init container started again. The markers are what make this safe.
 - **`up` reports an init failure itself**: `service "db-init" didn't complete successfully: exit 1`, after the middleware turned healthy.
 - **Real templates**: on the first `up` (39 s, Cassandra the slowest), MySQL ran both scripts, Cassandra created the keyspace and table, Kafka created a three-partition topic. A second `up` (2 s) logged `skip` for every script and left one seed row.
+- **Kafka's healthcheck was too heavy for CI.** It ran `kafka-broker-api-versions.sh`, a JVM, every 5 s: at the template's 0.5 CPU one check took 2.7–6.6 s (1.35 s at 1.0 CPU), past the 3 s timeout, so Kafka never turned healthy on the CI runner, the first time CI started Kafka. A TCP probe (`bash -c '</dev/tcp/localhost/9092'`) takes under 0.15 s; Kafka is healthy after about 10 s, and `kafka-topics.sh --create` right after succeeded 3/3.
 - **`cqlsh`** exits 2 on a failed statement and on a query against a missing keyspace, so an unmarked script runs; the `cassandra` and `mysql` images run as root and ship `sha256sum`.
 - **Drafting topics** (`qwen3.5:latest`, thinking off, M7b's Spring Boot fixture, 3 runs each; "binds" means `DB_URL`, `DB_PASSWORD`, and `KAFKA` all bound):
 

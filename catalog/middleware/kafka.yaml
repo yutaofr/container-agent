@@ -19,8 +19,11 @@ env:
   KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
   KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
   KAFKA_HEAP_OPTS: -Xmx256m -Xms256m
+# A TCP probe: kafka-broker-api-versions.sh starts a JVM, which at 0.5 CPU took 2.7-6.6 s, past
+# the 3 s timeout, and spent most of the container's CPU. The open listener is enough: clients,
+# init's kafka-topics.sh among them, retry until the broker answers.
 healthcheck:
-  cmd: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null"]
+  cmd: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9092'"]
 presets:
   tiny: { mem_limit: 768m, cpus: 0.5 }
   standard: { mem_limit: 1536m, cpus: 1.0 }
