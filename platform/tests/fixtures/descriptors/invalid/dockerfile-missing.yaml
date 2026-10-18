@@ -1,0 +1,6 @@
+name: demo
+kind: app
+stack: dockerfile
+sources:
+  workdir: { build: "make" }
+runtime: {}

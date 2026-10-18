@@ -1,8 +1,10 @@
 from pathlib import Path
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
-from cagent.catalog import CatalogError, load_catalog
+from cagent.catalog import CatalogError, ServiceDescriptor, load_catalog
 
 from .conftest import FIXTURE_CATALOG, REPO_CATALOG
 
@@ -57,3 +59,25 @@ def test_invalid_version_specifier_is_rejected(tmp_path):
 def test_missing_root_is_rejected(tmp_path):
     with pytest.raises(CatalogError, match="not a directory"):
         load_catalog(tmp_path / "nope")
+
+
+DESCRIPTORS = Path(__file__).parent / "fixtures" / "descriptors"
+
+
+@pytest.mark.parametrize("path", sorted(DESCRIPTORS.glob("valid/*.yaml")), ids=lambda p: p.name)
+def test_shared_valid_descriptors(path):
+    ServiceDescriptor.model_validate(yaml.safe_load(path.read_text()))
+
+
+# The Runner's workdir tests read the same files, so both sides agree on workdir sources.
+@pytest.mark.parametrize("path", sorted(DESCRIPTORS.glob("invalid/*.yaml")), ids=lambda p: p.name)
+def test_shared_invalid_descriptors(path):
+    with pytest.raises(ValidationError):
+        ServiceDescriptor.model_validate(yaml.safe_load(path.read_text()))
+
+
+def test_dockerfile_stack_builds_only_from_a_workdir():
+    doc = yaml.safe_load((DESCRIPTORS / "valid" / "dockerfile.yaml").read_text())
+    doc["sources"]["release"] = {"nexus": "com.acme:demo:{version}:jar"}
+    with pytest.raises(ValidationError, match="stack dockerfile builds only from a workdir"):
+        ServiceDescriptor.model_validate(doc)

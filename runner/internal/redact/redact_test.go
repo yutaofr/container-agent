@@ -28,6 +28,23 @@ func TestString(t *testing.T) {
 		{"private key",
 			"-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----",
 			"-----PRIVATE KEY ******-----"},
+		// References name a secret without holding it: the platform needs them to draft and
+		// read back descriptors. A reference's default is a value, so it is masked.
+		{"descriptor bind template",
+			`SPRING_DATASOURCE_PASSWORD: "{{password}}"`,
+			`SPRING_DATASOURCE_PASSWORD: "{{password}}"`},
+		{"spring placeholder",
+			"spring.datasource.password=${DB_PASSWORD}",
+			"spring.datasource.password=${DB_PASSWORD}"},
+		{"spring placeholder default",
+			"password: ${DB_PASSWORD:s3cret}",
+			"password: ${DB_PASSWORD:******}"},
+		{"url credentials reference",
+			"jdbc:mysql://{{user}}:{{password}}@{{host}}/app",
+			"jdbc:mysql://{{user}}:{{password}}@{{host}}/app"},
+		{"placeholder-shaped secret is still masked",
+			"password=${x}y",
+			"password=******"},
 		{"plain log line untouched",
 			"Started Application in 3.2 seconds (tokenizer ready)",
 			"Started Application in 3.2 seconds (tokenizer ready)"},
@@ -42,7 +59,7 @@ func TestString(t *testing.T) {
 }
 
 func TestStringIsIdempotent(t *testing.T) {
-	in := "password=s3cret token: abc"
+	in := "password=s3cret token: abc secret: ${API_SECRET:x} url://u:p@h"
 	once := String(in)
 	if twice := String(once); twice != once {
 		t.Errorf("second pass changed output: %q -> %q", once, twice)

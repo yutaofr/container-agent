@@ -39,7 +39,8 @@ const usage = `usage:
   cagent-runner verify   -name N [-probes probes.json]
   cagent-runner down     -name N
   cagent-runner serve    -hub ws://HOST/runner [-token-env CAGENT_TOKEN] [-workdir-root DIR]... [-allow-rule RULE]... [-maven-settings F]
-  cagent-runner build    -name N -service S -tag cagent/S:REF (-maven G:A:V[:EXT] [-settings F] | -workdir DIR) [-stack S] [-jdk V]`
+  cagent-runner build    -name N -service S -tag cagent/S:REF (-maven G:A:V[:EXT] [-settings F] | -workdir DIR) [-stack S] [-jdk V]
+  cagent-runner inspect  -workdir DIR`
 
 // Report is the JSON that validate prints, and that up prints when it refuses to start.
 type Report struct {
@@ -68,7 +69,7 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 	}
 	cmds := map[string]func([]string, io.Writer, io.Writer, deps) int{
 		"validate": runValidate, "up": runUp, "snapshot": runSnapshot, "verify": runVerify, "down": runDown,
-		"build": runBuild, "serve": runServe,
+		"build": runBuild, "serve": runServe, "inspect": runInspect,
 	}
 	cmd, ok := cmds[args[0]]
 	if !ok {
@@ -302,9 +303,9 @@ func runBuild(args []string, stdout, stderr io.Writer, d deps) int {
 	service := fs.String("service", "", "compose service the image is for")
 	tag := fs.String("tag", "", "image tag, cagent/<service>:<ref>")
 	coord := fs.String("maven", "", "repository artifact, group:artifact:version[:ext]")
-	dir := fs.String("workdir", "", "working directory holding .cagent/service.yaml")
+	dir := fs.String("workdir", "", "project root holding .cagent/services/<service>.yaml or .cagent/service.yaml")
 	settings := fs.String("settings", "", "Maven settings.xml (default ~/.m2/settings.xml)")
-	stack := fs.String("stack", "", "builder stack (default: the descriptor's, else java-springboot)")
+	stack := fs.String("stack", "", "builder stack; for -workdir it must match the project's descriptor (default java-springboot)")
 	jdk := fs.String("jdk", "", "Java major version (default "+builder.DefaultJDK+")")
 	if err := fs.Parse(args); err != nil {
 		return exitError
@@ -373,17 +374,29 @@ func runBuild(args []string, stdout, stderr io.Writer, d deps) int {
 		if err != nil {
 			return usageErr(err.Error())
 		}
-		desc, err := workdir.LoadDescriptor(abs)
+		desc, err := workdir.LoadDescriptor(abs, *service)
 		if err != nil {
 			return usageErr(err.Error())
 		}
-		res.Source = "workdir:" + abs
-		if *stack == "" {
-			*stack = desc.Stack
+		// The project decides how it is built; the platform cannot pick another stack.
+		if *stack != "" && *stack != desc.Stack {
+			return usageErr(fmt.Sprintf("stack %q differs from the project's descriptor (%q)", *stack, desc.Stack))
 		}
+		*stack = desc.Stack
+		res.Source = "workdir:" + abs
 		artifact, err := workdir.Build(ctx, abs, desc)
 		if err != nil {
 			return failed(err)
+		}
+		if desc.Stack == workdir.StackDockerfile {
+			dockerfile, contextDir, err := workdir.DockerInputs(abs, desc)
+			if err != nil {
+				return failed(err)
+			}
+			if err := builder.BuildDockerfile(ctx, d.docker, *tag, dockerfile, contextDir); err != nil {
+				return failed(err)
+			}
+			return writeOrFail(stdout, stderr, res)
 		}
 		src, err := os.Open(artifact)
 		if err != nil {

@@ -87,3 +87,51 @@ def test_template_command_is_emitted():
             "services"
         ]["redis"]
     )
+
+
+def test_gaps_carry_the_answers_that_would_close_them(catalog):
+    spec = spec_with(
+        services=[
+            {
+                "name": "order-service",
+                "source": {"kind": "ci", "ref": "main#1"},
+                "publish": {"grpc": 9090},
+            },
+            {"name": "billing", "source": {"kind": "workdir", "ref": "/src/billing"}},
+        ],
+        middleware=[
+            {"template": "mysq"},
+            {"template": "kafka", "version": "2.0", "preset": "huge"},
+            {"template": "redis", "preset": "huge"},
+        ],
+    )
+    with pytest.raises(GenerationError) as err:
+        generate(spec, catalog)
+    gaps = {(g.kind, g.target, g.key): g for g in err.value.gaps}
+    assert gaps[("unknown_template", "mysq", None)].options == ("kafka", "mysql", "redis")
+    assert gaps[("unknown_template", "mysq", None)].default == "mysql"
+    assert gaps[("unsupported_version", "kafka", None)].options == ("3.9.0", "4.0.0")
+    assert gaps[("unsupported_version", "kafka", None)].default == "3.9.0"
+    assert gaps[("unknown_preset", "redis", None)].options == ("tiny", "standard")
+    assert gaps[("no_provider", "order-service/mysql", None)].options == ("mysql",)
+    assert gaps[("missing_env", "order-service", "SPRING_PROFILES_ACTIVE")].options == ()
+    assert gaps[("unknown_port", "order-service", "grpc")].default == "http"
+    assert ("unregistered", "billing", None) in gaps
+    # ci is declared by order-service, so the ci source is fine; no no_source gap.
+    assert not any(k == "no_source" for k, _, _ in gaps)
+    assert err.value.problems == [str(g) for g in err.value.gaps]
+
+
+def test_undeclared_source_kind_offers_the_declared_ones(catalog):
+    desc = catalog.services["order-service"]
+    sources = desc.sources.model_copy(update={"ci": None, "workdir": None})
+    catalog.services["order-service"] = desc.model_copy(update={"sources": sources})
+    spec = spec_with(services=[{"name": "order-service", "source": {"kind": "ci", "ref": "x"}}])
+    with pytest.raises(GenerationError) as err:
+        generate(spec, catalog)
+    gap = next(g for g in err.value.gaps if g.kind == "no_source")
+    assert (gap.target, gap.options, gap.default) == (
+        "order-service",
+        ("release", "snapshot"),
+        "release",
+    )

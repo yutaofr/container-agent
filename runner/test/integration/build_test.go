@@ -186,7 +186,7 @@ func TestWorkdirBuildsWithTheDevelopersCommand(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(proj, workdir.DescriptorPath), []byte(desc), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	dl, err := workdir.LoadDescriptor(proj)
+	dl, err := workdir.LoadDescriptor(proj, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}

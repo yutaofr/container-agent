@@ -1,5 +1,6 @@
 """Service descriptors and middleware templates, and loading them from catalog directories."""
 
+import posixpath
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
@@ -73,9 +74,26 @@ class CiSource(Strict):
     artifact: str
 
 
+def _inside(path: str) -> bool:
+    """A relative path that stays inside its base lexically (symlinks are the Runner's job)."""
+    if not path or posixpath.isabs(path):
+        return False
+    norm = posixpath.normpath(path)
+    return norm != ".." and not norm.startswith("../")
+
+
 class WorkdirSource(Strict):
-    build: str
-    output: str
+    build: str | None = None  # the developer's command, run in the project root
+    output: str | None = None  # java-springboot: glob matching exactly one jar
+    dockerfile: str | None = None  # dockerfile: path to the project's Dockerfile
+    context: str | None = None  # dockerfile: build context, default "."
+
+    @model_validator(mode="after")
+    def _paths_inside(self) -> "WorkdirSource":
+        for path in (self.dockerfile, self.context):
+            if path is not None and not _inside(path):
+                raise ValueError(f"{path!r} must be a relative path inside the project")
+        return self
 
 
 class Sources(Strict):
@@ -112,15 +130,34 @@ class Probe(Strict):
 
 
 class ServiceDescriptor(Strict):
-    """An application's `.cagent/service.yaml`."""
+    """An application's `.cagent/service.yaml` or `.cagent/services/<name>.yaml`.
+
+    stack java-springboot images a jar with the Runner's template; dockerfile builds the
+    project's own Dockerfile. The Runner's workdir package applies the same workdir rules.
+    """
 
     name: Name
     kind: Literal["app"]
-    stack: str
+    stack: Literal["java-springboot", "dockerfile"]
     sources: Sources
     runtime: Runtime
     requires: list[Requirement] = []
     probes: list[Probe] = []
+
+    @model_validator(mode="after")
+    def _workdir_fits_stack(self) -> "ServiceDescriptor":
+        w = self.sources.workdir
+        if self.stack == "dockerfile":
+            if self.sources.release or self.sources.snapshot or self.sources.ci:
+                raise ValueError("stack dockerfile builds only from a workdir source")
+            if w is None or w.dockerfile is None:
+                raise ValueError("stack dockerfile needs sources.workdir.dockerfile")
+        elif w is not None:
+            if w.build is None or w.output is None:
+                raise ValueError("sources.workdir needs build and output")
+            if w.dockerfile is not None or w.context is not None:
+                raise ValueError("sources.workdir: dockerfile and context need stack dockerfile")
+        return self
 
 
 class Provides(Strict):

@@ -49,26 +49,45 @@ class ModelUnavailable(Exception):
 
 
 class Completer(Protocol):
-    """One structured completion on one model; LiteLLMCompleter, or a fake in tests."""
+    """One structured completion on one model; LiteLLMCompleter, or a fake in tests.
+    think=False asks the model not to reason first; None leaves the model's default."""
 
     async def complete(
-        self, model: str, system: str, user: str, schema: type[M], timeout_s: float
+        self,
+        model: str,
+        system: str,
+        user: str,
+        schema: type[M],
+        timeout_s: float,
+        think: bool | None = None,
     ) -> M: ...
 
 
 class LiteLLMCompleter:
     async def complete(
-        self, model: str, system: str, user: str, schema: type[M], timeout_s: float
+        self,
+        model: str,
+        system: str,
+        user: str,
+        schema: type[M],
+        timeout_s: float,
+        think: bool | None = None,
     ) -> M:
         import litellm  # imported lazily: heavy, and tests never need it
 
         litellm.suppress_debug_info = True
+        extra = {}
+        if think is False and model.startswith("ollama"):
+            # LiteLLM maps any effort but low/medium/high to Ollama's think=false. Claude on
+            # Bedrock does not think unless asked, so nothing is sent there.
+            extra["reasoning_effort"] = "none"
         response = await litellm.acompletion(
             model=model,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             response_format=schema,
             temperature=0,
             timeout=timeout_s,
+            **extra,
         )
         try:
             return schema.model_validate_json(response.choices[0].message.content or "")
@@ -92,8 +111,11 @@ class Router:
         schema: type[M],
         start: str,
         needs: Sequence[str] = ("json",),
+        think: bool | None = None,
     ) -> tuple[M, str]:
-        """Return the first valid answer and the tier that gave it, starting at `start`."""
+        """Return the first valid answer and the tier that gave it, starting at `start`.
+        think=False suits extraction-like calls: a reasoning model answered them as well in
+        seconds instead of minutes (M7b plan, measurements)."""
         order = self.config.order
         errors: list[str] = []
         for tier in order[order.index(start) :]:
@@ -104,7 +126,7 @@ class Router:
             for _ in range(2):  # one retry on the same tier before moving up
                 try:
                     return await self.completer.complete(
-                        cfg.model, system, user, schema, cfg.timeout_s
+                        cfg.model, system, user, schema, cfg.timeout_s, think
                     ), tier
                 except SchemaError as e:
                     errors.append(f"{tier}: invalid answer: {str(e)[:200]}")

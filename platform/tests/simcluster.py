@@ -24,6 +24,7 @@ class SimCluster:
         starting_snapshots: int = 0,
         requires_env: dict[str, dict[str, str]] | None = None,
         errors: dict[str, str] | None = None,
+        projects: dict[str, dict[str, Any]] | None = None,
     ):
         self.occupied = occupied_ports or set()
         self.needs_mb = needs_mb or {}  # below this mem_limit the service is OOM-killed
@@ -33,6 +34,8 @@ class SimCluster:
         # service -> environment it needs; until it has it, it exits 1 logging errors[service]
         self.requires_env = requires_env or {}
         self.errors = errors or {}
+        # workdir -> what inspect reports; tests add a saved descriptor to its "files"
+        self.projects = projects or {}
         self.compose: dict[str, Any] | None = None
         self.calls: list[str] = []
         self.builds: list[dict[str, Any]] = []
@@ -57,6 +60,11 @@ class SimCluster:
         findings = [f for f in self.findings if f"{f['service']}:{f['rule']}" not in allowed]
         out = {"project": p["name"], "findings": findings, "port_conflicts": conflicts}
         return ToolResult(1 if findings or conflicts else 0, out)
+
+    def _inspect(self, p: dict[str, Any]) -> ToolResult:
+        if p["workdir"] not in self.projects:
+            return ToolResult(2, None, f"{p['workdir']} is not a directory")
+        return ToolResult(0, self.projects[p["workdir"]])
 
     def _build(self, p: dict[str, Any]) -> ToolResult:
         self.builds.append(p)

@@ -2,6 +2,7 @@ import pytest
 from pydantic import BaseModel
 
 from cagent.llm import (
+    LiteLLMCompleter,
     ModelConfig,
     ModelUnavailable,
     Router,
@@ -68,3 +69,34 @@ def test_shipped_model_config_loads():
     config = load_model_config(REPO / "platform" / "models.yaml")
     assert config.order == ["small", "large"]
     assert all(t.model.startswith("ollama_chat/") for t in config.tiers.values())
+
+
+async def test_think_is_passed_to_the_completer():
+    fake = FakeCompleter({"fake/large": [{"text": "a"}, {"text": "b"}]})
+    router = Router(CONFIG, fake)
+    await router.ask("sys", "user", Answer, start="large", think=False)
+    await router.ask("sys", "user", Answer, start="large")
+    assert fake.thinks == [False, None]
+
+
+@pytest.mark.parametrize(
+    "model, think, sent",
+    [
+        ("ollama_chat/qwen3.5:latest", False, {"reasoning_effort": "none"}),
+        ("ollama_chat/qwen3.5:latest", None, {}),
+        ("bedrock/anthropic.claude", False, {}),  # Claude does not think unless asked
+    ],
+)
+async def test_litellm_turns_thinking_off_only_for_ollama(monkeypatch, model, think, sent):
+    import litellm
+
+    seen = {}
+
+    async def acompletion(**kwargs):
+        seen.update(kwargs)
+        message = type("M", (), {"content": '{"text": "ok"}'})
+        return type("R", (), {"choices": [type("C", (), {"message": message})]})
+
+    monkeypatch.setattr(litellm, "acompletion", acompletion)
+    await LiteLLMCompleter().complete(model, "sys", "user", Answer, 5, think=think)
+    assert {k: seen[k] for k in ("reasoning_effort",) if k in seen} == sent

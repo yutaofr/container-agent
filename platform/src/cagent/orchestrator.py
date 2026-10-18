@@ -1,5 +1,8 @@
 """Deterministic orchestrator: the design's state machine (section 4) as a LangGraph graph.
 
+    extract ─→ generate ──gap──→ ask ⏸ ──answer──→ generate
+                  │ └──unregistered workdir──→ inspect → save ⏸ → readback → generate
+                  ▼
     generate → validate → approve ⏸ → build → up → watch → stabilize → done
                   ↑                              │        │
                   └────────── diagnose ←─────────┴────────┘
@@ -10,7 +13,8 @@
                                  ▼
                              escalate ⏸
 
-Only `approve`, `approve_patch`, and `escalate` wait for a person, via LangGraph interrupts;
+Only `ask`, `save`, `approve`, `approve_patch`, and `escalate` wait for a person, via
+LangGraph interrupts;
 they do nothing before interrupting, because a node that called interrupt() runs again from
 the top when resumed. All cluster work goes through the Runner's tools, so the orchestrator
 never touches Docker.
@@ -23,13 +27,17 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol, TypedDict
 
+import yaml
 from jsonpatch import JsonPatchException
 from jsonpointer import JsonPointerException
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from cagent.catalog import Catalog
+from cagent.catalog import Catalog, ServiceDescriptor
+from cagent.clarify import AnswerError, apply_answer, extract, question
 from cagent.diagnose import declared_env, propose
+from cagent.draft import DraftError, draft, read_back, resource_note
+from cagent.gaps import ANSWERABLE, Gap
 from cagent.generate import GenerationError, generate, to_yaml
 from cagent.hub import ToolResult
 from cagent.llm import ModelUnavailable, Router
@@ -62,12 +70,18 @@ class Settings:
     startup_timeout_s: float = 300
     poll_interval_s: float = 3
     stability_window_s: float = 120
+    max_questions: int = 20
 
 
 class State(TypedDict, total=False):
     cluster: str
     runner: str
-    spec: dict[str, Any]
+    purpose: str | None  # set when the run starts from a sentence instead of a spec
+    spec: dict[str, Any] | None
+    question: dict[str, Any] | None  # the gap being asked about, and the last answer's error
+    asked: int
+    drafting: dict[str, Any] | None  # a descriptor draft waiting to be saved
+    descriptors: dict[str, str]  # service -> descriptor read back from the user's project
     compose: dict[str, Any] | None
     allow: list[str]
     approved: bool
@@ -121,10 +135,28 @@ class Orchestrator:
     # --- public API -------------------------------------------------------------------------
 
     async def start(self, thread_id: str, spec: ClusterSpec, runner: str) -> Status:
-        initial: State = {
-            "cluster": spec.name,
+        await self.graph.ainvoke(self._initial(runner, spec=spec), self._config(thread_id))
+        return await self.status(thread_id)
+
+    async def start_from_purpose(self, thread_id: str, purpose: str, runner: str) -> Status:
+        """Start from a sentence: a model drafts the spec, then questions close its gaps."""
+        if self.router is None:
+            raise ValueError("starting from a purpose needs a model router")
+        await self.graph.ainvoke(self._initial(runner, purpose=purpose), self._config(thread_id))
+        return await self.status(thread_id)
+
+    def _initial(
+        self, runner: str, spec: ClusterSpec | None = None, purpose: str | None = None
+    ) -> State:
+        return {
+            "cluster": spec.name if spec else "",
             "runner": runner,
-            "spec": spec.model_dump(),
+            "purpose": purpose,
+            "spec": spec.model_dump() if spec else None,
+            "question": None,
+            "asked": 0,
+            "drafting": None,
+            "descriptors": {},
             "compose": None,
             "allow": [],
             "approved": False,
@@ -145,12 +177,11 @@ class Orchestrator:
             "outcome": None,
             "deadline": self.clock() + self.settings.deadline_s,
         }
-        await self.graph.ainvoke(initial, self._config(thread_id))
-        return await self.status(thread_id)
 
     async def resume(self, thread_id: str, decision: dict[str, Any]) -> Status:
-        """Answer the pending approval ({"approve": bool, "allow": [...]}) or escalation
-        ({"action": "retry" | "abort"})."""
+        """Answer what is pending: a question ({"answer": value | None}), a save
+        ({"saved": True}), an approval ({"approve": bool, "allow": [...]}), or an escalation
+        ({"action": "retry"}). {"action": "abort"} ends a question, save, or escalation."""
         await self.graph.ainvoke(Command(resume=decision), self._config(thread_id))
         return await self.status(thread_id)
 
@@ -171,6 +202,11 @@ class Orchestrator:
     def _graph(self) -> StateGraph:
         g = StateGraph(State)
         for name in (
+            "extract",
+            "ask",
+            "inspect",
+            "save",
+            "readback",
             "generate",
             "validate",
             "approve",
@@ -184,7 +220,9 @@ class Orchestrator:
             "done",
         ):
             g.add_node(name, getattr(self, f"_step_{name}"))
-        g.add_edge(START, "generate")
+        g.add_conditional_edges(
+            START, lambda s: "generate" if s["spec"] else "extract", ["generate", "extract"]
+        )
         g.add_edge("done", END)
         return g
 
@@ -195,12 +233,148 @@ class Orchestrator:
     def _escalation(kind: str, **detail: Any) -> Command:
         return Command(update={"escalation": {"reason": kind, **detail}}, goto="escalate")
 
-    async def _step_generate(self, state: State) -> Command:
+    def _catalog(self, state: State) -> Catalog:
+        """The shared catalog plus the descriptors read back from this run's projects."""
+        saved = state.get("descriptors") or {}
+        if not saved:
+            return self.catalog
+        services = {
+            name: ServiceDescriptor.model_validate(yaml.safe_load(text))
+            for name, text in saved.items()
+        }
+        return Catalog({**self.catalog.services, **services}, self.catalog.middleware)
+
+    async def _step_extract(self, state: State) -> Command:
         try:
-            compose = generate(ClusterSpec.model_validate(state["spec"]), self.catalog)
+            spec = await extract(self.router, state["purpose"], self.catalog)
+        except ModelUnavailable as e:
+            return self._escalation("model_unavailable", step="extract", detail=str(e))
+        return Command(update={"spec": spec.model_dump(), "cluster": spec.name}, goto="generate")
+
+    async def _step_generate(self, state: State) -> Command:
+        spec = ClusterSpec.model_validate(state["spec"])
+        try:
+            compose = generate(spec, self._catalog(state))
         except GenerationError as e:
-            return self._escalation("clarify", problems=e.problems)
+            return self._close_gap(state, spec, e)
         return Command(update={"compose": compose, "seen": [fingerprint(compose)]}, goto="validate")
+
+    def _close_gap(self, state: State, spec: ClusterSpec, e: GenerationError) -> Command:
+        """Ask about the first gap, inspect an unregistered project, or escalate."""
+        gap = e.gaps[0]
+        if gap.kind == "unregistered":
+            ref = next(s for s in spec.services if s.name == gap.target)
+            if ref.source.kind == "workdir":
+                drafting = {"service": ref.name, "workdir": ref.source.ref, "error": None}
+                return Command(update={"drafting": drafting}, goto="inspect")
+        answerable = gap.kind in ANSWERABLE and (gap.options or gap.kind == "missing_env")
+        if answerable and state["asked"] < self.settings.max_questions:
+            return Command(update={"question": {"gap": gap.to_dict(), "error": None}}, goto="ask")
+        return self._escalation("clarify", problems=e.problems)
+
+    async def _step_ask(self, state: State) -> Command:
+        q = state["question"]
+        gap = Gap.from_dict(q["gap"])
+        decision = interrupt(
+            {
+                "kind": "question",
+                "gap": q["gap"],
+                "question": question(gap),
+                "options": q["gap"]["options"],
+                "default": gap.default,
+                "error": q["error"],
+            }
+        )
+        if decision.get("action") == "abort":
+            return Command(update={"outcome": "rejected"}, goto=END)
+        asked = state["asked"] + 1
+        try:
+            spec = apply_answer(
+                ClusterSpec.model_validate(state["spec"]), gap, decision.get("answer")
+            )
+        except AnswerError as err:
+            return Command(
+                update={"asked": asked, "question": {**q, "error": str(err)}}, goto="ask"
+            )
+        return Command(
+            update={"spec": spec.model_dump(), "asked": asked, "question": None}, goto="generate"
+        )
+
+    async def _inspect(self, state: State) -> ToolResult:
+        workdir = state["drafting"]["workdir"]
+        return await self.hub.call(state["runner"], "inspect", {"workdir": workdir})
+
+    async def _step_inspect(self, state: State) -> Command:
+        """Use a descriptor the project already has; otherwise draft one for the user."""
+        d = state["drafting"]
+        res = await self._inspect(state)
+        if not res.ok or not isinstance(res.output, dict):
+            return self._escalation("runner_error", step="inspect", stderr=res.stderr)
+        try:
+            read_back(d["service"], res.output)
+        except DraftError:
+            pass
+        else:
+            return self._saved(state, res.output)
+        if self.router is None:
+            return self._escalation(
+                "clarify",
+                problems=[f"{d['service']}: not registered, and no model to draft a descriptor"],
+            )
+        try:
+            drafted = await draft(self.router, d["service"], res.output, self.catalog)
+        except DraftError as e:
+            return self._escalation("clarify", problems=[str(e)])
+        except ModelUnavailable as e:
+            return self._escalation("model_unavailable", step="draft", detail=str(e))
+        return Command(
+            update={
+                "drafting": {
+                    **d,
+                    "files": {drafted.path: drafted.text},
+                    "note": resource_note(res.output["resources"]),
+                }
+            },
+            goto="save",
+        )
+
+    async def _step_save(self, state: State) -> Command:
+        d = state["drafting"]
+        decision = interrupt(
+            {
+                "kind": "save_descriptors",
+                "service": d["service"],
+                "workdir": d["workdir"],
+                "files": d["files"],
+                "note": d["note"],
+                "error": d["error"],
+            }
+        )
+        if decision.get("action") == "abort":
+            return Command(update={"outcome": "rejected"}, goto=END)
+        return Command(goto="readback")
+
+    async def _step_readback(self, state: State) -> Command:
+        """Validate the descriptor the user saved, as the Runner will read it."""
+        res = await self._inspect(state)
+        if not res.ok or not isinstance(res.output, dict):
+            return self._escalation("runner_error", step="inspect", stderr=res.stderr)
+        try:
+            read_back(state["drafting"]["service"], res.output)
+        except DraftError as e:
+            return Command(update={"drafting": {**state["drafting"], "error": str(e)}}, goto="save")
+        return self._saved(state, res.output)
+
+    @staticmethod
+    def _saved(state: State, inspection: dict[str, Any]) -> Command:
+        service = state["drafting"]["service"]
+        files = inspection["files"]
+        path = f".cagent/services/{service}.yaml"
+        text = files.get(path, files.get(".cagent/service.yaml"))
+        return Command(
+            update={"descriptors": {**state["descriptors"], service: text}, "drafting": None},
+            goto="generate",
+        )
 
     async def _step_validate(self, state: State) -> Command:
         res = await self._call(
@@ -255,8 +429,9 @@ class Orchestrator:
 
     async def _step_build(self, state: State) -> Command:
         spec = ClusterSpec.model_validate(state["spec"])
+        catalog = self._catalog(state)
         for ref in spec.services:
-            desc = self.catalog.services[ref.name]
+            desc = catalog.services[ref.name]
             params: dict[str, Any] = {
                 "service": ref.name,
                 "stack": desc.stack,
@@ -302,8 +477,9 @@ class Orchestrator:
     def _probes(self, state: State) -> list[dict[str, Any]]:
         """L3 probes from each app service's descriptor."""
         probes = []
+        catalog = self._catalog(state)
         for ref in ClusterSpec.model_validate(state["spec"]).services:
-            desc = self.catalog.services[ref.name]
+            desc = catalog.services[ref.name]
             ports = {p.name: p.container for p in desc.runtime.ports}
             for pr in desc.probes:
                 port = ports[pr.http.port] if pr.http.port else next(iter(ports.values()))
@@ -440,7 +616,7 @@ class Orchestrator:
                 problem,
                 state["snapshot"],
                 state["compose"],
-                declared_env(spec, self.catalog),
+                declared_env(spec, self._catalog(state)),
                 state["attempts"].get(problem.signature, 0),
             )
         except ModelUnavailable as e:
