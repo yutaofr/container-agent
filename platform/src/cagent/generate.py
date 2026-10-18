@@ -4,11 +4,12 @@ import difflib
 import hashlib
 import re
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Any
 
 import yaml
 
-from cagent.catalog import Catalog, Healthcheck
+from cagent.catalog import Catalog, Healthcheck, MiddlewareTemplate, TemplateInit
 from cagent.gaps import Gap
 from cagent.matching import Binding, match
 from cagent.render import RenderError, escape_compose, render
@@ -16,6 +17,10 @@ from cagent.spec import ClusterSpec, Source
 
 # Shared healthcheck timing: up to ~2.5 minutes after a 10 s grace period.
 HEALTH_TIMING = {"interval": "5s", "timeout": "3s", "retries": 30, "start_period": "10s"}
+
+# Where an init service sees each consumer's staged scripts: <INIT_ROOT>/<consumer>/NN-file.
+INIT_ROOT = "/cagent-init"
+INIT_LABELS = {"cagent.role": "init"}  # the Runner's verify and signals read this label
 
 
 class GenerationError(Exception):
@@ -48,6 +53,96 @@ def _healthcheck(hc: Healthcheck, ports: dict[str, int], values: dict[str, str])
         probe = f"test \"$(curl -s -o /dev/null -w '%{{http_code}}' {url})\" = {hc.expect}"
         test = ["CMD-SHELL", escape_compose(probe)]
     return {"test": test, **HEALTH_TIMING}
+
+
+@dataclass
+class _InitWork:
+    """What one middleware instance's init service creates."""
+
+    keyspaces: list[str] = field(default_factory=list)
+    topics: dict[str, int] = field(default_factory=dict)  # name -> partitions
+    scripts: list[tuple[str, str]] = field(default_factory=list)  # (consumer, capability)
+    consumers: set[str] = field(default_factory=set)  # services that wait for it
+
+
+def _plan_init(
+    bindings: list[Binding], templates: dict[str, MiddlewareTemplate], gaps: list[Gap]
+) -> dict[str, _InitWork]:
+    """Init work per provider instance, consumers in name order. A requirement asking for
+    something its template cannot do is a gap."""
+    work: dict[str, _InitWork] = {}
+    for b in sorted(bindings, key=lambda b: (b.consumer, b.requirement.capability)):
+        init = b.requirement.init
+        if init is None or not (init.scripts or init.keyspaces or init.topics):
+            continue
+        tpl = templates[b.provider]
+        can = tpl.init or TemplateInit()
+        problems = []
+        if init.keyspaces and can.keyspaces is None:
+            problems.append(f"{tpl.name} cannot create keyspaces")
+        if init.topics and can.topics is None:
+            problems.append(f"{tpl.name} cannot create topics")
+        if init.scripts and can.scripts is None:
+            problems.append(f"{tpl.name} cannot run scripts")
+        elif can.scripts is not None:
+            suffix = can.scripts.suffix
+            problems += [
+                f"{s}: {tpl.name} runs {suffix} scripts"
+                for s in init.scripts
+                if not s.endswith(suffix)
+            ]
+        target = f"{b.consumer}/{b.requirement.capability}"
+        if problems:
+            gaps += [Gap("unsupported_init", target, f"{target}: {p}") for p in problems]
+            continue
+        w = work.setdefault(b.provider, _InitWork())
+        w.consumers.add(b.consumer)
+        w.keyspaces += [k for k in init.keyspaces if k not in w.keyspaces]
+        for topic in init.topics:
+            w.topics[topic.name] = max(w.topics.get(topic.name, 0), topic.partitions)
+        if init.scripts:
+            w.scripts.append((b.consumer, b.requirement.capability))
+    return work
+
+
+def _guarded(command: str, what: str) -> str:
+    """Run command; on failure, name what failed and stop. set -e alone misses a failure on
+    the left of && inside a template's command."""
+    return f'{{ {command}; }} || {{ echo "cagent init failed: {what}" >&2; exit 1; }}'
+
+
+def _init_script(tpl: MiddlewareTemplate, values: dict[str, str], w: _InitWork) -> str:
+    """The init service's shell program: keyspaces and topics, which are idempotent, then
+    each staged script not yet marked, consumers in name order, files in staged order."""
+    init = tpl.init or TemplateInit()
+    lines = ["set -eu"]
+    if init.keyspaces:
+        lines += [
+            _guarded(render(init.keyspaces.run, {**values, "keyspace": k}), f"keyspace {k}")
+            for k in w.keyspaces
+        ]
+    if init.topics:
+        lines += [
+            _guarded(
+                render(init.topics.run, {**values, "topic": name, "partitions": str(n)}),
+                f"topic {name}",
+            )
+            for name, n in sorted(w.topics.items())
+        ]
+    if init.scripts and w.scripts:
+        s = init.scripts
+        dirs = " ".join(f"{INIT_ROOT}/{consumer}/*" for consumer, _ in w.scripts)
+        lines += [
+            f"for file in {dirs}; do",
+            '  [ -f "$file" ] || continue',
+            '  sha=$(sha256sum "$file" | cut -d " " -f 1)',
+            f'  if {render(s.marked, values)}; then echo "skip $file"; continue; fi',
+            '  echo "run $file"',
+            f"  {_guarded(render(s.run, values), '$file')}",
+            f"  {_guarded(render(s.mark, values), 'marking $file')}",
+            "done",
+        ]
+    return "\n".join(lines)
 
 
 def generate(spec: ClusterSpec, catalog: Catalog) -> dict[str, Any]:
@@ -116,6 +211,9 @@ def generate(spec: ClusterSpec, catalog: Catalog) -> dict[str, Any]:
     for b in bindings:
         by_consumer[b.consumer].append(b)
     instances = {m.instance: m for m in spec.middleware}
+    templates = {i: catalog.middleware[m.template] for i, m in instances.items() if i in services}
+    init_work = _plan_init([b for b in bindings if b.provider in templates], templates, gaps)
+    initialized = {(c, provider) for provider, w in init_work.items() for c in w.consumers}
 
     for ref in spec.services:
         desc = catalog.services.get(ref.name)
@@ -148,6 +246,8 @@ def generate(spec: ClusterSpec, catalog: Catalog) -> dict[str, Any]:
                     key = f"{ref.name}/{b.requirement.capability}"
                     gaps.append(Gap("bind_render", key, f"{key}: {var}: {e}", key=var))
             depends[b.provider] = {"condition": "service_healthy"}
+            if (ref.name, b.provider) in initialized:
+                depends[f"{b.provider}-init"] = {"condition": "service_completed_successfully"}
         env.update(ref.env)
         for var in desc.runtime.env.required:
             if var not in env:
@@ -183,6 +283,35 @@ def generate(spec: ClusterSpec, catalog: Catalog) -> dict[str, Any]:
         if desc.runtime.healthcheck is not None:
             svc["healthcheck"] = _healthcheck(desc.runtime.healthcheck, ports, {})
         services[ref.name] = svc
+
+    taken = {s.name for s in spec.services} | set(instances)
+    for provider, w in sorted(init_work.items()):
+        name = f"{provider}-init"
+        if name in taken:
+            gaps.append(
+                Gap(
+                    "unsupported_init",
+                    name,
+                    f"{name}: name taken by the init service of {provider}",
+                )
+            )
+            continue
+        tpl = templates[provider]
+        values = {"host": provider, "port": str(tpl.port), **tpl.connection}
+        init_svc: dict[str, Any] = {
+            "image": services[provider]["image"],
+            "entrypoint": ["sh", "-c", escape_compose(_init_script(tpl, values, w))],
+            "depends_on": {provider: {"condition": "service_healthy"}},
+            "restart": "no",
+            "mem_limit": (tpl.init or TemplateInit()).mem_limit,
+            "labels": dict(INIT_LABELS),
+        }
+        if w.scripts:
+            init_svc["volumes"] = [
+                f"./init/{consumer}/{capability}:{INIT_ROOT}/{consumer}:ro"
+                for consumer, capability in w.scripts
+            ]
+        services[name] = init_svc
 
     if gaps:
         raise GenerationError(gaps)

@@ -18,6 +18,7 @@ import (
 	"github.com/yutaofr/container-agent/runner/internal/cluster"
 	"github.com/yutaofr/container-agent/runner/internal/compose"
 	"github.com/yutaofr/container-agent/runner/internal/dockercli"
+	"github.com/yutaofr/container-agent/runner/internal/initscripts"
 	"github.com/yutaofr/container-agent/runner/internal/maven"
 	"github.com/yutaofr/container-agent/runner/internal/signals"
 	"github.com/yutaofr/container-agent/runner/internal/verify"
@@ -287,13 +288,14 @@ func runDown(args []string, stdout, stderr io.Writer, d deps) int {
 // BuildResult is the JSON that build prints. On failure Error and Log are set instead of
 // Cached, and the exit code is exitFindings so the platform can diagnose the log.
 type BuildResult struct {
-	Image   string   `json:"image"`
-	Source  string   `json:"source"`
-	Version string   `json:"version,omitempty"` // resolved repository version
-	SHA256  string   `json:"sha256,omitempty"`
-	Cached  bool     `json:"cached"`
-	Error   string   `json:"error,omitempty"`
-	Log     []string `json:"log,omitempty"`
+	Image   string               `json:"image"`
+	Source  string               `json:"source"`
+	Version string               `json:"version,omitempty"` // resolved repository version
+	SHA256  string               `json:"sha256,omitempty"`
+	Cached  bool                 `json:"cached"`
+	Init    []initscripts.Staged `json:"init,omitempty"`
+	Error   string               `json:"error,omitempty"`
+	Log     []string             `json:"log,omitempty"`
 }
 
 func runBuild(args []string, stdout, stderr io.Writer, d deps) int {
@@ -307,6 +309,8 @@ func runBuild(args []string, stdout, stderr io.Writer, d deps) int {
 	settings := fs.String("settings", "", "Maven settings.xml (default ~/.m2/settings.xml)")
 	stack := fs.String("stack", "", "builder stack; for -workdir it must match the project's descriptor (default java-springboot)")
 	jdk := fs.String("jdk", "", "Java major version (default "+builder.DefaultJDK+")")
+	var inits stringList
+	fs.Var(&inits, "init", "init script of a -maven build, capability=classpath path (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return exitError
 	}
@@ -318,12 +322,29 @@ func runBuild(args []string, stdout, stderr io.Writer, d deps) int {
 		return usageErr(fmt.Sprintf("invalid -tag %q: must be cagent/<service>:<ref>", *tag))
 	case (*coord == "") == (*dir == ""):
 		return usageErr("build needs exactly one of -maven or -workdir")
+	case len(inits) > 0 && *dir != "":
+		return usageErr("-init applies to -maven builds; a workdir project declares its own scripts")
+	}
+	scripts := make([]initscripts.Script, 0, len(inits))
+	for _, s := range inits {
+		capability, p, ok := strings.Cut(s, "=")
+		if !ok {
+			return usageErr(fmt.Sprintf("-init %q is not capability=path", s))
+		}
+		scripts = append(scripts, initscripts.Script{Capability: capability, Path: p})
+	}
+	if err := initscripts.Check(scripts); err != nil {
+		return usageErr(err.Error())
 	}
 	w, err := openWorkspace(d)
 	if err != nil {
 		return usageErr(err.Error())
 	}
 	buildDir, err := w.BuildDir(*name, *service)
+	if err != nil {
+		return usageErr(err.Error())
+	}
+	initDir, err := w.InitDir(*name, *service)
 	if err != nil {
 		return usageErr(err.Error())
 	}
@@ -366,7 +387,12 @@ func runBuild(args []string, stdout, stderr io.Writer, d deps) int {
 			return failed(err)
 		}
 		res.Source, res.Version = "maven:"+c.String(), art.Resolved
-		if _, res.SHA256, err = client.Download(ctx, art, buildDir, builder.ArtifactFile); err != nil {
+		jar, sum, err := client.Download(ctx, art, buildDir, builder.ArtifactFile)
+		if err != nil {
+			return failed(err)
+		}
+		res.SHA256 = sum
+		if res.Init, err = initscripts.FromJar(jar, scripts, initDir); err != nil {
 			return failed(err)
 		}
 	} else {
@@ -386,6 +412,9 @@ func runBuild(args []string, stdout, stderr io.Writer, d deps) int {
 		res.Source = "workdir:" + abs
 		artifact, err := workdir.Build(ctx, abs, desc)
 		if err != nil {
+			return failed(err)
+		}
+		if res.Init, err = initscripts.FromDir(abs, desc.Scripts(), initDir); err != nil {
 			return failed(err)
 		}
 		if desc.Stack == workdir.StackDockerfile {

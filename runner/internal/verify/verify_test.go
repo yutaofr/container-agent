@@ -105,3 +105,30 @@ func TestProbeFailures(t *testing.T) {
 		}
 	}
 }
+
+func TestCompletedInitContainerPassesL1(t *testing.T) {
+	done := signals.Service{Service: "mysql-init", Role: "init", State: "exited", ExitCode: 0}
+	rep := Verify(context.Background(), &dockercli.Fake{}, snapshot(dbRunning, done), nil)
+	if !rep.Passed || rep.Reached != "L2" {
+		t.Fatalf("got %+v", rep)
+	}
+	if got := rep.Results[1]; !got.OK || got.Detail != "init completed" {
+		t.Errorf("init L1 = %+v", got)
+	}
+}
+
+func TestFailedOrRunningInitContainerFailsL1(t *testing.T) {
+	for _, tc := range []struct {
+		s    signals.Service
+		want string
+	}{
+		{signals.Service{Service: "mysql-init", Role: "init", State: "exited", ExitCode: 1,
+			Tail: []string{"ERROR 1064 at line 1"}}, "init failed, exit 1: ERROR 1064 at line 1"},
+		{signals.Service{Service: "mysql-init", Role: "init", State: "running"}, "init still running"},
+	} {
+		rep := Verify(context.Background(), &dockercli.Fake{}, snapshot(dbRunning, tc.s), nil)
+		if rep.Passed || rep.Results[1].OK || rep.Results[1].Detail != tc.want {
+			t.Errorf("got %+v, want detail %q", rep.Results[1], tc.want)
+		}
+	}
+}

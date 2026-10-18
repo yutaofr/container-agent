@@ -103,10 +103,40 @@ class Sources(Strict):
     workdir: WorkdirSource | None = None
 
 
+# Init resources (M7c). Names end up in shell commands and CQL, so the patterns are strict.
+MAX_SCRIPTS = 20  # per requirement; the Runner's initscripts package has the same limit
+TOPIC_PATTERN = r"^[A-Za-z0-9._-]{1,128}$"  # Kafka's own topic name rule
+KEYSPACE_PATTERN = r"^[A-Za-z][A-Za-z0-9_]{0,47}$"  # Cassandra's unquoted identifier rule
+
+
+class Topic(Strict):
+    name: Annotated[str, Field(pattern=TOPIC_PATTERN)]
+    partitions: Annotated[int, Field(ge=1, le=1000)] = 1
+
+
+class RequirementInit(Strict):
+    """What a service needs created in its middleware before it starts."""
+
+    # Relative to the project root (workdir) or classpath paths inside the jar (release,
+    # snapshot); run in this order.
+    scripts: Annotated[list[str], Field(max_length=MAX_SCRIPTS)] = []
+    keyspaces: list[Annotated[str, Field(pattern=KEYSPACE_PATTERN)]] = []
+    topics: list[Topic] = []
+
+    @field_validator("scripts")
+    @classmethod
+    def _scripts_inside(cls, scripts: list[str]) -> list[str]:
+        for path in scripts:
+            if not _inside(path):
+                raise ValueError(f"script {path!r} must be a relative path inside the project")
+        return scripts
+
+
 class Requirement(Strict):
     capability: str
     version: str | None = None  # PEP 440 specifier, e.g. ">=8.0"
     bind: dict[str, str] = {}  # env var -> template over {{host}}, {{port}}, provider connection
+    init: RequirementInit | None = None
 
     @field_validator("version")
     @classmethod
@@ -169,6 +199,29 @@ class Preset(Strict):
     cpus: float
 
 
+class InitCommand(Strict):
+    run: str  # one shell command, run once per keyspace or topic
+
+
+class ScriptInit(Strict):
+    """How a template runs one script file ($file) and records it by content ($sha)."""
+
+    suffix: Annotated[str, Field(pattern=r"^\.[a-z0-9]+$")]
+    run: str
+    marked: str  # exits 0 when $sha is already recorded
+    mark: str  # records $sha after run succeeded
+
+
+class TemplateInit(Strict):
+    """The init kinds a template supports. Commands may use {{host}}, {{port}}, and the
+    connection values; keyspaces add {{keyspace}}, topics {{topic}} and {{partitions}}."""
+
+    scripts: ScriptInit | None = None
+    keyspaces: InitCommand | None = None
+    topics: InitCommand | None = None
+    mem_limit: str = "256m"
+
+
 class MiddlewareTemplate(Strict):
     """A platform-maintained middleware definition."""
 
@@ -185,6 +238,7 @@ class MiddlewareTemplate(Strict):
     healthcheck: Healthcheck
     presets: dict[str, Preset]
     default_preset: str = "tiny"
+    init: TemplateInit | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> "MiddlewareTemplate":
@@ -199,7 +253,24 @@ class MiddlewareTemplate(Strict):
         used |= set().union(*(placeholders(c) for c in self.healthcheck.cmd or []))
         if unknown := used - known:
             raise ValueError(f"unknown placeholders: {', '.join(sorted(unknown))}")
+        if self.init is not None:
+            self._check_init(self.init, known)
         return self
+
+    @staticmethod
+    def _check_init(init: TemplateInit, known: set[str]) -> None:
+        commands: dict[str, tuple[list[str], set[str]]] = {}
+        if init.scripts:
+            s = init.scripts
+            commands["scripts"] = ([s.run, s.marked, s.mark], known)
+        if init.keyspaces:
+            commands["keyspaces"] = ([init.keyspaces.run], known | {"keyspace"})
+        if init.topics:
+            commands["topics"] = ([init.topics.run], known | {"topic", "partitions"})
+        for kind, (texts, allowed) in commands.items():
+            used = set().union(*(placeholders(t) for t in texts))
+            if unknown := used - allowed:
+                raise ValueError(f"init.{kind}: unknown placeholders: {', '.join(sorted(unknown))}")
 
 
 class CatalogError(Exception):

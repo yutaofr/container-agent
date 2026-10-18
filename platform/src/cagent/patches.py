@@ -78,9 +78,38 @@ def _op_allowed(op: object) -> bool:
     return True
 
 
-def within_environment(patch: list[dict[str, Any]]) -> bool:
-    """True when every operation only changes environment-level service settings."""
-    return all(_op_allowed(op) for op in patch)
+_SERVICE_OF = re.compile(rf"/services/({_SERVICE})(/.*)?")
+_DEPENDS_ON = re.compile(rf"/services/{_SERVICE}/depends_on(/.*)?")
+
+
+def init_services(compose: dict[str, Any]) -> frozenset[str]:
+    """Services the generator labelled as one-shot init services (M7c)."""
+    return frozenset(
+        name
+        for name, svc in (compose.get("services") or {}).items()
+        if (svc.get("labels") or {}).get("cagent.role") == "init"
+    )
+
+
+def _touches(op: dict[str, Any], protected: frozenset[str]) -> bool:
+    """An op on a protected service, on a dependency on one, or on a whole depends_on, which
+    could drop a wait for init."""
+    path = op.get("path", "")
+    if (m := _SERVICE_OF.fullmatch(path)) and m.group(1) in protected:
+        return True
+    if m := _DEPENDS_ON.fullmatch(path):
+        rest = (m.group(1) or "").lstrip("/").split("/", 1)[0]
+        return rest == "" or _unescape(rest) in protected
+    return False
+
+
+def within_environment(
+    patch: list[dict[str, Any]], protected: frozenset[str] = frozenset()
+) -> bool:
+    """True when every operation only changes environment-level service settings. Init
+    services, and other services' waits for them, are never changed automatically: an init
+    failure is the user's to fix."""
+    return all(_op_allowed(op) and not (protected and _touches(op, protected)) for op in patch)
 
 
 def apply(compose: dict[str, Any], patch: list[dict[str, Any]]) -> dict[str, Any]:

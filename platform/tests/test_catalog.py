@@ -17,7 +17,7 @@ def write_template(root: Path, name: str, text: str) -> None:
 
 
 def test_shipped_catalog_loads(catalog):
-    assert set(catalog.middleware) == {"mysql", "redis", "kafka"}
+    assert set(catalog.middleware) == {"mysql", "redis", "kafka", "cassandra"}
     assert set(catalog.services) == {"order-service"}
     assert catalog.middleware["kafka"].provides.capability == "kafka"
     assert catalog.services["order-service"].requires[0].version == ">=8.0"
@@ -81,3 +81,10 @@ def test_dockerfile_stack_builds_only_from_a_workdir():
     doc["sources"]["release"] = {"nexus": "com.acme:demo:{version}:jar"}
     with pytest.raises(ValidationError, match="stack dockerfile builds only from a workdir"):
         ServiceDescriptor.model_validate(doc)
+
+
+def test_kafka_healthcheck_starts_no_jvm(catalog):
+    """Each /opt/kafka/bin tool starts a JVM: at the template's 0.5 CPU one took 2.7-6.6 s,
+    past the 3 s healthcheck timeout, so Kafka never turned healthy on CI."""
+    cmd = " ".join(catalog.middleware["kafka"].healthcheck.cmd)
+    assert "/opt/kafka/bin/" not in cmd

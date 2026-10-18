@@ -28,6 +28,7 @@ var DefaultOptions = Options{TailLines: 200, MaxErrorLines: 20, KeepTail: 5}
 type Service struct {
 	Service      string   `json:"service"`
 	Container    string   `json:"container"`
+	Role         string   `json:"role,omitempty"` // "init" for a one-shot init service
 	State        string   `json:"state"`
 	ExitCode     int      `json:"exit_code"`
 	OOMKilled    bool     `json:"oom_killed"`
@@ -43,6 +44,18 @@ type Service struct {
 type Snapshot struct {
 	Project  string    `json:"project"`
 	Services []Service `json:"services"`
+}
+
+// RoleLabel marks a container's role; RoleInit is a one-shot init service that runs its
+// middleware's init scripts and exits.
+const (
+	RoleLabel = "cagent.role"
+	RoleInit  = "init"
+)
+
+// Completed reports a one-shot init container that finished successfully.
+func (s Service) Completed() bool {
+	return s.Role == RoleInit && s.State == "exited" && s.ExitCode == 0
 }
 
 var errorLine = regexp.MustCompile(`(?i)error|exception|fatal|panic|caused by`)
@@ -69,6 +82,7 @@ func FromContainer(c dockercli.Container, logs string, opt Options) Service {
 	s := Service{
 		Service:      c.Service(),
 		Container:    strings.TrimPrefix(c.Name, "/"),
+		Role:         c.Config.Labels[RoleLabel],
 		State:        c.State.Status,
 		ExitCode:     c.State.ExitCode,
 		OOMKilled:    c.State.OOMKilled,
@@ -104,7 +118,9 @@ func FromContainer(c dockercli.Container, logs string, opt Options) Service {
 	}
 	s.Tail = append(s.Tail, lines...)
 
-	if stopped := c.State.Status == "exited" || c.State.Status == "dead"; stopped || c.State.Restarting || c.State.OOMKilled {
+	if s.Completed() {
+		sigs = map[string]bool{} // a finished init container is not a problem, whatever it logged
+	} else if stopped := c.State.Status == "exited" || c.State.Status == "dead"; stopped || c.State.Restarting || c.State.OOMKilled {
 		sigs[fingerprint.FromExit(s.Service, c.State.ExitCode, c.State.OOMKilled).String()] = true
 	}
 	s.Signatures = make([]string, 0, len(sigs))

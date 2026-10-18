@@ -15,12 +15,12 @@ platform-test:
 
 # Generated compose files must pass the real validate command, the real Runner must
 # answer the hub and reconnect after a hub restart, the orchestrator must heal a real
-# cluster with T0 rules alone, and an unregistered project must be inspected, drafted, and
-# built.
+# cluster with T0 rules alone, an unregistered project must be inspected, drafted, and
+# built, and init scripts, keyspaces, and topics must exist before the application starts.
 e2e: runner-build
-	cd platform && CAGENT_RUNNER=$(CURDIR)/bin/cagent-runner uv run pytest tests/test_cli.py tests/test_hub_e2e.py tests/test_orchestrator_e2e.py tests/test_inspect_e2e.py
+	cd platform && CAGENT_RUNNER=$(CURDIR)/bin/cagent-runner uv run pytest tests/test_cli.py tests/test_hub_e2e.py tests/test_orchestrator_e2e.py tests/test_inspect_e2e.py tests/test_init_e2e.py
 
-# Model tiers on real Docker, and Clarify's model calls. Needs a local Ollama serving the
-# models in platform/models.yaml; CI does not run it.
+# Model tiers on real Docker, and Clarify's and drafting's model calls. Needs a local Ollama
+# serving the models in platform/models.yaml; CI does not run it.
 e2e-llm: runner-build
-	cd platform && CAGENT_RUNNER=$(CURDIR)/bin/cagent-runner CAGENT_LLM_E2E=1 uv run pytest -s tests/test_llm_e2e.py tests/test_clarify_llm_e2e.py
+	cd platform && CAGENT_RUNNER=$(CURDIR)/bin/cagent-runner CAGENT_LLM_E2E=1 uv run pytest -s tests/test_llm_e2e.py tests/test_clarify_llm_e2e.py tests/test_draft_init_llm_e2e.py

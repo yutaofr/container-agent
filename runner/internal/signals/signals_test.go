@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -99,5 +100,28 @@ func TestCollectSortsServices(t *testing.T) {
 	}
 	if snap.Project != "cagent-demo" || len(snap.Services) != 2 || snap.Services[0].Service != "api" {
 		t.Errorf("got %+v", snap)
+	}
+}
+
+func TestCompletedInitContainerIsNoProblem(t *testing.T) {
+	c := container(t, `{"Id":"a","Name":"/cagent-demo-mysql-init-1",
+		"State":{"Status":"exited","ExitCode":0},
+		"Config":{"Labels":{"com.docker.compose.service":"mysql-init","cagent.role":"init"}}}`)
+	s := FromContainer(c, "run 01-schema.sql\nskip 02-seed.sql: error table already there\n", DefaultOptions)
+	if s.Role != "init" || len(s.Signatures) != 0 {
+		t.Errorf("role %q, signatures %v", s.Role, s.Signatures)
+	}
+}
+
+func TestFailedInitContainerKeepsItsEvidence(t *testing.T) {
+	c := container(t, `{"Id":"a","Name":"/cagent-demo-mysql-init-1",
+		"State":{"Status":"exited","ExitCode":1},
+		"Config":{"Labels":{"com.docker.compose.service":"mysql-init","cagent.role":"init"}}}`)
+	s := FromContainer(c, "ERROR 1064 (42000) at line 1: You have an error in your SQL syntax\n", DefaultOptions)
+	if !slices.Contains(s.Signatures, "exit:1@mysql-init") {
+		t.Errorf("signatures %v", s.Signatures)
+	}
+	if len(s.ErrorLines) != 1 {
+		t.Errorf("error lines %v", s.ErrorLines)
 	}
 }

@@ -83,6 +83,19 @@ func (w *Workspace) BuildDir(cluster, service string) (string, error) {
 	return build, nil
 }
 
+// InitDir returns where one service's init scripts are staged. It is not created: staging
+// replaces it whole.
+func (w *Workspace) InitDir(cluster, service string) (string, error) {
+	if !ValidName(service) {
+		return "", fmt.Errorf("invalid service name %q", service)
+	}
+	dir, err := w.ClusterDir(cluster)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "init", service), nil
+}
+
 // WriteNoFollow streams r into file, a plain file name inside dir, and returns the path
 // and the hex SHA-256 of the bytes written. The guard rejects a path that resolves outside
 // dir. The open then uses the declared path, not the resolved one, with O_NOFOLLOW, so it

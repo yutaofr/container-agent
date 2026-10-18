@@ -36,12 +36,12 @@ from langgraph.types import Command, interrupt
 from cagent.catalog import Catalog, ServiceDescriptor
 from cagent.clarify import AnswerError, apply_answer, extract, question
 from cagent.diagnose import declared_env, propose
-from cagent.draft import DraftError, draft, read_back, resource_note
+from cagent.draft import DraftError, draft, read_back
 from cagent.gaps import ANSWERABLE, Gap
 from cagent.generate import GenerationError, generate, to_yaml
 from cagent.hub import ToolResult
 from cagent.llm import ModelUnavailable, Router
-from cagent.patches import apply, fingerprint, within_environment
+from cagent.patches import apply, fingerprint, init_services, within_environment
 from cagent.rules import (
     Problem,
     first_fix,
@@ -114,6 +114,21 @@ class Status:
 
 
 _BIND = re.compile(r"Bind for [0-9.:\[\]]*?:(\d+) failed|0\.0\.0\.0:(\d+).*address already in use")
+# docker compose's error when a service_completed_successfully dependency exits non-zero
+_NOT_COMPLETED = re.compile(r"service \"([A-Za-z0-9._-]+)\" didn't complete successfully")
+# the generated init loop's last words: what it was running when it failed
+_INIT_FAILED = re.compile(r"cagent init failed: (.+)")
+
+
+def _completed(s: dict[str, Any]) -> bool:
+    return s.get("role") == "init" and s["state"] == "exited" and s.get("exit_code") == 0
+
+
+def _failed_init(snap: dict[str, Any]) -> dict[str, Any] | None:
+    for s in snap.get("services") or []:
+        if s.get("role") == "init" and s["state"] == "exited" and s.get("exit_code") != 0:
+            return s
+    return None
 
 
 class Orchestrator:
@@ -229,6 +244,15 @@ class Orchestrator:
     async def _call(self, state: State, method: str, **params: Any) -> ToolResult:
         return await self.hub.call(state["runner"], method, {"name": state["cluster"], **params})
 
+    def _init_failed(self, s: dict[str, Any]) -> Command:
+        """An init script failed: that is the project's code or data, not the environment, so
+        no rule or model tries a fix. The user fixes it and retries; build stages it again."""
+        lines = s.get("tail") or []
+        script = next(
+            (m.group(1) for ln in reversed(lines) if (m := _INIT_FAILED.search(ln))), None
+        )
+        return self._escalation("init_failed", service=s["service"], script=script, log=lines)
+
     @staticmethod
     def _escalation(kind: str, **detail: Any) -> Command:
         return Command(update={"escalation": {"reason": kind, **detail}}, goto="escalate")
@@ -332,7 +356,7 @@ class Orchestrator:
                 "drafting": {
                     **d,
                     "files": {drafted.path: drafted.text},
-                    "note": resource_note(res.output["resources"]),
+                    "note": drafted.note,
                 }
             },
             goto="save",
@@ -443,6 +467,14 @@ class Orchestrator:
                 params["maven"] = pattern.replace(
                     "{version}", ref.source.ref.removesuffix("-SNAPSHOT")
                 )
+                scripts = [
+                    {"capability": r.capability, "path": path}
+                    for r in desc.requires
+                    if r.init
+                    for path in r.init.scripts
+                ]
+                if scripts:
+                    params["init"] = scripts
             elif kind == "workdir":
                 params["workdir"] = ref.source.ref
             else:
@@ -458,6 +490,11 @@ class Orchestrator:
         res = await self._call(state, "up", compose=to_yaml(state["compose"]), allow=state["allow"])
         if res.ok:
             return Command(goto="watch")
+        m = _NOT_COMPLETED.search(res.stderr or "")
+        if m and m.group(1) in init_services(state["compose"]):
+            snap = await self._snapshot(state)
+            failed = next((s for s in snap["services"] if s["service"] == m.group(1)), None)
+            return self._init_failed(failed or {"service": m.group(1), "tail": []})
         if problems := self._bind_problems(state["compose"], res.stderr):
             return Command(update={"problems": [asdict(p) for p in problems]}, goto="diagnose")
         return self._escalation("up_failed", stderr=res.stderr)
@@ -499,6 +536,8 @@ class Orchestrator:
         deadline = self.clock() + self.settings.startup_timeout_s
         while True:
             snap = await self._snapshot(state)
+            if failed := _failed_init(snap):
+                return self._init_failed(failed)
             if problems := problems_from_snapshot(snap):
                 return Command(
                     update={"problems": [asdict(p) for p in problems], "snapshot": snap},
@@ -506,7 +545,8 @@ class Orchestrator:
                 )
             services = snap.get("services", [])
             settled = services and all(
-                s["state"] == "running" and s.get("health") != "starting" for s in services
+                (s["state"] == "running" and s.get("health") != "starting") or _completed(s)
+                for s in services
             )
             if settled:
                 rep = (await self._call(state, "verify", probes=self._probes(state))).output
@@ -550,7 +590,7 @@ class Orchestrator:
                 exhausted.append(p.signature)
                 continue
             fix = first_fix(p, compose)
-            if fix is None or not within_environment(fix.patch):
+            if fix is None or not within_environment(fix.patch, init_services(compose)):
                 unruled.append(p)
                 continue
             return self._apply_fix(state, p.signature, asdict(fix), fix.patch)
@@ -668,12 +708,15 @@ class Orchestrator:
         )
         if decision.get("action") != "retry":
             return Command(update={"outcome": "escalated"}, goto=END)
+        reason = (state["escalation"] or {}).get("reason")
         return Command(
             update={
                 "attempts": {},
                 "rounds": 0,
                 "escalation": None,
                 "deadline": self.clock() + self.settings.deadline_s,
+                # a fixed init script reaches the cluster only through build's staging
+                "built": state["built"] and reason != "init_failed",
             },
             goto="validate" if state["compose"] else "generate",
         )

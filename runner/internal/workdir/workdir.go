@@ -17,6 +17,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/yutaofr/container-agent/runner/internal/guard"
+	"github.com/yutaofr/container-agent/runner/internal/initscripts"
 	"github.com/yutaofr/container-agent/runner/internal/redact"
 	"github.com/yutaofr/container-agent/runner/internal/workspace"
 )
@@ -53,6 +54,23 @@ type Descriptor struct {
 	Sources struct {
 		Workdir *Workdir `yaml:"workdir"`
 	} `yaml:"sources"`
+	Requires []struct {
+		Capability string `yaml:"capability"`
+		Init       struct {
+			Scripts []string `yaml:"scripts"`
+		} `yaml:"init"`
+	} `yaml:"requires"`
+}
+
+// Scripts lists the init scripts the descriptor declares, in declared order.
+func (d Descriptor) Scripts() []initscripts.Script {
+	var out []initscripts.Script
+	for _, r := range d.Requires {
+		for _, p := range r.Init.Scripts {
+			out = append(out, initscripts.Script{Capability: r.Capability, Path: p})
+		}
+	}
+	return out
 }
 
 // LoadDescriptor reads service's descriptor from dir: ServicesDir/<service>.yaml when it
@@ -117,18 +135,15 @@ func ParseDescriptor(data []byte, service string) (Descriptor, error) {
 	default:
 		return Descriptor{}, fmt.Errorf("unsupported stack %q", d.Stack)
 	}
+	if err := initscripts.Check(d.Scripts()); err != nil {
+		return Descriptor{}, err
+	}
 	return d, nil
 }
 
 // Relative reports whether p is a relative path that stays inside its base lexically.
 // Symlinks are checked when the path is used.
-func Relative(p string) bool {
-	if p == "" || filepath.IsAbs(p) {
-		return false
-	}
-	c := filepath.Clean(p)
-	return c != ".." && !strings.HasPrefix(c, ".."+string(filepath.Separator))
-}
+func Relative(p string) bool { return initscripts.Relative(p) }
 
 // DockerInputs returns the resolved Dockerfile and build context of a dockerfile-stack
 // descriptor. Both must resolve inside dir: a symlink cannot point the build elsewhere.

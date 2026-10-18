@@ -108,7 +108,12 @@ def test_gaps_carry_the_answers_that_would_close_them(catalog):
     with pytest.raises(GenerationError) as err:
         generate(spec, catalog)
     gaps = {(g.kind, g.target, g.key): g for g in err.value.gaps}
-    assert gaps[("unknown_template", "mysq", None)].options == ("kafka", "mysql", "redis")
+    assert gaps[("unknown_template", "mysq", None)].options == (
+        "cassandra",
+        "kafka",
+        "mysql",
+        "redis",
+    )
     assert gaps[("unknown_template", "mysq", None)].default == "mysql"
     assert gaps[("unsupported_version", "kafka", None)].options == ("3.9.0", "4.0.0")
     assert gaps[("unsupported_version", "kafka", None)].default == "3.9.0"

@@ -17,6 +17,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from cagent.catalog import (
+    TOPIC_PATTERN,
     Catalog,
     Env,
     Healthcheck,
@@ -24,8 +25,10 @@ from cagent.catalog import (
     Port,
     Probe,
     Requirement,
+    RequirementInit,
     Runtime,
     ServiceDescriptor,
+    Topic,
 )
 from cagent.llm import ModelUnavailable, Router
 from cagent.render import placeholders
@@ -54,6 +57,7 @@ class Draft:
     path: str  # where the user saves it, relative to the project root
     text: str
     descriptor: ServiceDescriptor
+    note: str = ""  # what the user should know before saving: init scripts, topics, omissions
 
 
 def _slug(text: str) -> str:
@@ -155,6 +159,11 @@ class _Requirement(BaseModel):
     bind: dict[str, str] = {}
 
 
+class _Topic(BaseModel):
+    name: str
+    partitions: int | None = None
+
+
 class DraftAnswer(BaseModel):
     """What the model fills in; the skeleton supplies everything else. It is flatter than a
     descriptor: a JSON schema cannot say "exactly one of http or cmd", and a local model
@@ -214,6 +223,20 @@ DRAFT_SYSTEM = (
 )
 
 
+class TopicsAnswer(BaseModel):
+    """Kafka topics, asked apart from the runtime: on qwen3.5, asking for both in one call
+    made the model copy the worked example's variable names into its binds."""
+
+    topics: list[_Topic] = []
+
+
+TOPICS_SYSTEM = (
+    "You list the Kafka topics one service reads or writes, from its configuration. Give each "
+    "topic by its resolved name: for ${ORDERS_TOPIC:orders} the name is orders. List only "
+    "topics; a broker address is not a topic. Answer only with JSON matching the schema."
+)
+
+
 def _capabilities(catalog: Catalog) -> dict[str, set[str]]:
     """capability -> the values every template providing it offers a bind template."""
     caps: dict[str, set[str]] = {}
@@ -228,6 +251,32 @@ def _module_files(sk: Skeleton, files: dict[str, str]) -> dict[str, str]:
     if sk.module == ".":
         return {p: c for p, c in files.items() if not p.startswith(".cagent/")}
     return {p: c for p, c in files.items() if p.startswith(f"{sk.module}/")}
+
+
+def _flatten(doc: Any, prefix: str = "") -> dict[str, str]:
+    if isinstance(doc, dict):
+        out: dict[str, str] = {}
+        for k, v in doc.items():
+            out.update(_flatten(v, f"{prefix}{k}."))
+        return out
+    return {prefix.rstrip("."): str(doc)}
+
+
+def topic_settings(texts: dict[str, str]) -> list[str]:
+    """Configuration keys that name a topic, as "key: value", from YAML and properties."""
+    found: dict[str, str] = {}
+    for path, text in texts.items():
+        if path.endswith((".yml", ".yaml")):
+            try:
+                found.update(_flatten(yaml.safe_load(text) or {}))
+            except yaml.YAMLError:
+                continue
+        elif path.endswith(".properties"):
+            for line in text.splitlines():
+                key, sep, value = line.partition("=")
+                if sep and not key.lstrip().startswith("#"):
+                    found[key.strip()] = value.strip()
+    return [f"{k}: {v}" for k, v in sorted(found.items()) if "topic" in k.lower()]
 
 
 def draft_prompt(sk: Skeleton, files: dict[str, str], catalog: Catalog) -> str:
@@ -250,6 +299,47 @@ def draft_prompt(sk: Skeleton, files: dict[str, str], catalog: Catalog) -> str:
             *caps,
         ]
     )
+
+
+def topics_prompt(texts: dict[str, str]) -> str:
+    return "\n".join(
+        [
+            *(f"--- {p}\n{c}" for p, c in sorted(texts.items())),
+            "Configuration values that name Kafka topics: " + "; ".join(topic_settings(texts)),
+        ]
+    )
+
+
+def _bad_topics(topics: list[_Topic]) -> list[str]:
+    return [
+        f"topic {t.name!r} is not a valid Kafka topic name; give the resolved name, "
+        "e.g. orders for ${ORDERS_TOPIC:orders}"
+        for t in topics
+        if not re.fullmatch(TOPIC_PATTERN, t.name)
+    ]
+
+
+async def draft_topics(router: Router, texts: dict[str, str]) -> tuple[list[Topic], list[str]]:
+    """Topics from the configuration, by the top tier; an invalid name is asked again once,
+    then left out with a note. A model failure leaves topics to the user, noted."""
+    prompt, feedback = topics_prompt(texts), ""
+    for _ in range(2):
+        try:
+            answer, _ = await router.ask(
+                TOPICS_SYSTEM,
+                prompt + feedback,
+                TopicsAnswer,
+                start=router.config.order[-1],
+                think=False,
+            )
+        except ModelUnavailable as e:
+            return [], [f"Topics were not drafted ({e}); add them under requires[].init.topics."]
+        if not (bad := _bad_topics(answer.topics)):
+            break
+        feedback = f"\nYour previous answer was invalid: {'; '.join(bad)}"
+    good = [t for t in answer.topics if re.fullmatch(TOPIC_PATTERN, t.name)]
+    notes = [f"Left out {b}." for b in bad]
+    return [Topic(name=t.name, partitions=t.partitions or 1) for t in good], notes
 
 
 def _problems(answer: DraftAnswer, required: list[str], catalog: Catalog) -> list[str]:
@@ -283,6 +373,89 @@ def _problems(answer: DraftAnswer, required: list[str], catalog: Catalog) -> lis
     return problems
 
 
+_MIGRATIONS = ("db/migration/", "db/changelog/")
+# Spring Boot runs classpath schema*.sql and data*.sql itself when this is set.
+_SPRING_RUNS_SQL = re.compile(
+    r"sql\.init\.mode\s*[=:]\s*always|sql:\s*\n\s+init:\s*\n\s+mode:\s*always"
+)
+_SPRING_SCRIPT = re.compile(r"src/main/resources/(schema|data)[^/]*\.sql$")
+
+
+def _owned(resource: str, sk: Skeleton, modules: list[str]) -> bool:
+    """A resource belongs to the module it sits in; one outside every module, to all."""
+    if sk.module == "." or resource.startswith(f"{sk.module}/"):
+        return True
+    return not any(resource.startswith(f"{m}/") for m in modules)
+
+
+def _init(
+    sk: Skeleton,
+    inspection: dict[str, Any],
+    answer: DraftAnswer,
+    catalog: Catalog,
+    topics: list[Topic],
+) -> tuple[dict[str, RequirementInit], list[str]]:
+    """Init per required capability: scripts mapped by code, topics as drafted, and notes on
+    everything found but left out."""
+    required = {r.capability for r in answer.requires}
+    runs: dict[str, str] = {}  # script suffix -> a required capability that runs it
+    creates_topics = None
+    for tpl in sorted(catalog.middleware.values(), key=lambda t: t.name):
+        cap = tpl.provides.capability
+        if tpl.init and cap in required:
+            if tpl.init.scripts:
+                runs.setdefault(tpl.init.scripts.suffix, cap)
+            if tpl.init.topics and creates_topics is None:
+                creates_topics = cap
+    texts = "\n".join(_module_files(sk, inspection["files"]).values())
+    spring_runs = bool(_SPRING_RUNS_SQL.search(texts))
+    scripts: dict[str, list[str]] = {}
+    notes, migrations = [], False
+    for res in sorted(inspection["resources"]):
+        if not _owned(res, sk, inspection["modules"]):
+            continue
+        if any(m in res for m in _MIGRATIONS):
+            migrations = True
+        elif spring_runs and _SPRING_SCRIPT.search(res):
+            notes.append(f"Left out {res}: the application runs it itself (spring.sql.init.mode).")
+        elif (cap := runs.get(_suffix(res))) is not None:
+            scripts.setdefault(cap, []).append(res)
+        else:
+            notes.append(
+                f"Left out {res}: the draft requires no capability that runs "
+                f"{_suffix(res)} scripts."
+            )
+    out = {cap: RequirementInit(scripts=paths) for cap, paths in scripts.items()}
+    if topics and creates_topics is not None:
+        prev = out.get(creates_topics, RequirementInit())
+        out[creates_topics] = prev.model_copy(update={"topics": topics})
+    lead = []
+    for cap, init in sorted(out.items()):
+        if init.scripts:
+            lead.append(
+                f"Init scripts for {cap}, run once before the service starts: "
+                f"{', '.join(init.scripts)}."
+            )
+        if init.topics:
+            lead.append(f"Topics created in {cap}: {', '.join(t.name for t in init.topics)}.")
+    if migrations:
+        lead.append("Flyway or Liquibase migrations run when the application starts.")
+    return out, lead + notes
+
+
+def _creates_topics(answer: DraftAnswer, catalog: Catalog) -> bool:
+    required = {r.capability for r in answer.requires}
+    return any(
+        t.init and t.init.topics and t.provides.capability in required
+        for t in catalog.middleware.values()
+    )
+
+
+def _suffix(path: str) -> str:
+    name = path.rsplit("/", 1)[-1]
+    return name[name.rfind(".") :] if "." in name else ""
+
+
 def _render(sk: Skeleton, service: str, descriptor: ServiceDescriptor) -> str:
     body = yaml.safe_dump(
         descriptor.model_dump(mode="json", exclude_none=True), sort_keys=False, allow_unicode=True
@@ -311,6 +484,11 @@ async def draft(
         answer = answer.without_bound()
         problems = _problems(answer, required, catalog)
         if not problems:
+            topics, topic_notes = [], []
+            if _creates_topics(answer, catalog) and topic_settings(files):
+                topics, topic_notes = await draft_topics(router, files)
+            init, notes = _init(sk, inspection, answer, catalog, topics)
+            notes += topic_notes
             try:
                 descriptor = ServiceDescriptor(
                     name=service,
@@ -318,14 +496,18 @@ async def draft(
                     stack=sk.stack,
                     sources={"workdir": sk.workdir},
                     runtime=answer.runtime(),
-                    requires=[Requirement(**r.model_dump()) for r in answer.requires],
+                    requires=[
+                        Requirement(**r.model_dump(), init=init.get(r.capability))
+                        for r in answer.requires
+                    ],
                     probes=[Probe(http=HttpProbe(path=p)) for p in answer.probe_paths],
                 )
             except ValidationError as e:
                 problems = [str(e)]
             else:
                 path = f".cagent/services/{service}.yaml"
-                return Draft(path, _render(sk, service, descriptor), descriptor)
+                text = _render(sk, service, descriptor)
+                return Draft(path, text, descriptor, " ".join(notes))
         errors.append("; ".join(problems))
     raise ModelUnavailable(f"no valid draft for {service}: {' | '.join(errors)}")
 
@@ -356,20 +538,3 @@ def read_back(service: str, inspection: dict[str, Any]) -> ServiceDescriptor:
     if desc.sources.workdir is None:
         raise DraftError(f"{path} declares no workdir source")
     return desc
-
-
-def resource_note(resources: list[str]) -> str:
-    """What the user should know about init resources the inspection found."""
-    if not resources:
-        return ""
-    migrations = [r for r in resources if "db/migration/" in r or "db/changelog/" in r]
-    scripts = [r for r in resources if r not in migrations]
-    lines = []
-    if migrations:
-        lines.append("Flyway or Liquibase migrations run when the application starts.")
-    if scripts:
-        lines.append(
-            "These scripts are not run yet; M7c will run them before the service starts: "
-            + ", ".join(scripts)
-        )
-    return " ".join(lines)
