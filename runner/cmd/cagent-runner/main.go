@@ -39,7 +39,8 @@ const usage = `usage:
   cagent-runner verify   -name N [-probes probes.json]
   cagent-runner down     -name N
   cagent-runner serve    -hub ws://HOST/runner [-token-env CAGENT_TOKEN] [-workdir-root DIR]... [-allow-rule RULE]... [-maven-settings F]
-  cagent-runner build    -name N -service S -tag cagent/S:REF (-maven G:A:V[:EXT] [-settings F] | -workdir DIR) [-stack S] [-jdk V]`
+  cagent-runner build    -name N -service S -tag cagent/S:REF (-maven G:A:V[:EXT] [-settings F] | -workdir DIR) [-stack S] [-jdk V]
+  cagent-runner inspect  -workdir DIR`
 
 // Report is the JSON that validate prints, and that up prints when it refuses to start.
 type Report struct {
@@ -68,7 +69,7 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 	}
 	cmds := map[string]func([]string, io.Writer, io.Writer, deps) int{
 		"validate": runValidate, "up": runUp, "snapshot": runSnapshot, "verify": runVerify, "down": runDown,
-		"build": runBuild, "serve": runServe,
+		"build": runBuild, "serve": runServe, "inspect": runInspect,
 	}
 	cmd, ok := cmds[args[0]]
 	if !ok {

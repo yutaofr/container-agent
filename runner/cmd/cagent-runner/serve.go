@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -258,6 +257,7 @@ var tools = map[string]tool{
 	"down":     nameTool("down"),
 	"verify":   verifyTool,
 	"build":    buildTool,
+	"inspect":  inspectTool,
 }
 
 // decode parses params strictly: an unknown field is an error, not silently ignored.
@@ -398,14 +398,11 @@ func buildTool(cfg serveConfig, _ deps, params json.RawMessage) ([]string, error
 			argv = append(argv, "-settings", cfg.settings)
 		}
 	case p.Workdir != "" && p.Maven == "":
-		dir, err := guard.Resolve(p.Workdir)
+		dir, err := allowedWorkdir(cfg, p.Workdir)
 		if err != nil {
 			return nil, err
 		}
-		if !withinRoots(dir, cfg.workdirRoots) {
-			return nil, fmt.Errorf("workdir %s is outside every -workdir-root the user allowed", p.Workdir)
-		}
-		argv = append(argv, "-workdir", filepath.Clean(dir))
+		argv = append(argv, "-workdir", dir)
 	default:
 		return nil, errors.New("build needs exactly one of maven or workdir")
 	}
