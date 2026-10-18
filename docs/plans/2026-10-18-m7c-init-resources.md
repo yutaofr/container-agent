@@ -1678,7 +1678,7 @@ func inspectTime(t *testing.T, container, format string) time.Time {
 Go is not on the host, and the tests must reach the host's Docker: cross-compile the test binary in the container, run it on the host.
 
 ```bash
-docker run --rm -v "$PWD":/repo -w /repo/runner -v cagent-gomod:/go/pkg/mod -v cagent-gocache:/root/.cache/go-build golang:1.24 go vet -tags integration ./test/integration/ && docker run --rm -v "$PWD":/repo -w /repo/runner -v cagent-gomod:/go/pkg/mod -v cagent-gocache:/root/.cache/go-build -e GOOS=darwin -e GOARCH=arm64 golang:1.24 go test -c -tags integration -o /repo/bin/it.test ./test/integration/ && (cd runner/test/integration && ../../../bin/it.test -test.count=1 -test.v) ; status=$?; rm -f bin/it.test && rmdir bin && test -z "$(docker ps -aq --filter label=cagent.managed)" && exit $status
+docker run --rm -v "$PWD":/repo -w /repo/runner -v cagent-gomod:/go/pkg/mod -v cagent-gocache:/root/.cache/go-build golang:1.24 go vet -tags integration ./test/integration/ && docker run --rm -v "$PWD":/repo -w /repo/runner -v cagent-gomod:/go/pkg/mod -v cagent-gocache:/root/.cache/go-build -e GOOS=darwin -e GOARCH=arm64 golang:1.24 go test -c -tags integration -o /repo/bin/it.test ./test/integration/ && (cd runner/test/integration && ../../../bin/it.test -test.count=1 -test.v) ; rc=$?; rm -f bin/it.test && rmdir bin && test -z "$(docker ps -aq --filter label=cagent.managed)" && exit $rc
 ```
 
 Expected: every test `PASS`, among them `TestInitScriptsFromAProjectAndAJarRunBeforeTheApplication` (about 9 s); nothing left running.
@@ -4470,7 +4470,7 @@ e2e: runner-build
 `make e2e` builds a Linux binary; on this Mac, build a darwin one in the container and run the test.
 
 ```bash
-docker run --rm -v "$PWD":/repo -w /repo -v cagent-gomod:/go/pkg/mod -v cagent-gocache:/root/.cache/go-build -e GOOS=darwin -e GOARCH=arm64 golang:1.24 make runner-build && (cd platform && CAGENT_RUNNER=$PWD/../bin/cagent-runner uv run pytest -q tests/test_init_e2e.py) ; status=$?; rm -f bin/cagent-runner && rmdir bin && test -z "$(docker ps -aq --filter label=cagent.managed)" && test -z "$(docker images -q "cagent/*")" && exit $status
+docker run --rm -v "$PWD":/repo -w /repo -v cagent-gomod:/go/pkg/mod -v cagent-gocache:/root/.cache/go-build -e GOOS=darwin -e GOARCH=arm64 golang:1.24 make runner-build && (cd platform && CAGENT_RUNNER=$PWD/../bin/cagent-runner uv run pytest -q tests/test_init_e2e.py) ; rc=$?; rm -f bin/cagent-runner && rmdir bin && test -z "$(docker ps -aq --filter label=cagent.managed)" && test -z "$(docker images -q "cagent/*")" && exit $rc
 ```
 
 Expected: `2 passed` (about 95 s; Cassandra takes about 35 s to turn healthy), nothing left behind.
@@ -4821,7 +4821,7 @@ with:
 Or paste the block into https://mermaid.live.
 
 ```bash
-mkdir -p .mmd && python3 -c "import re;[open(f'.mmd/{i}.mmd','w').write(b) for i,b in enumerate(re.findall(r'\`\`\`mermaid\n(.*?)\`\`\`', open('docs/plans/2026-10-18-m7c-init-resources-design.md').read(), re.S))]" && for m in .mmd/*.mmd; do docker run --rm -v "$PWD/.mmd":/data minlag/mermaid-cli -i /data/$(basename $m) -o /data/$(basename $m .mmd).svg >/dev/null || exit 1; done; status=$?; rm -f .mmd/* && rmdir .mmd && exit $status
+mkdir -p .mmd && python3 -c "import re;[open(f'.mmd/{i}.mmd','w').write(b) for i,b in enumerate(re.findall(r'\`\`\`mermaid\n(.*?)\`\`\`', open('docs/plans/2026-10-18-m7c-init-resources-design.md').read(), re.S))]" && for m in .mmd/*.mmd; do docker run --rm -v "$PWD/.mmd":/data minlag/mermaid-cli -i /data/$(basename $m) -o /data/$(basename $m .mmd).svg >/dev/null || exit 1; done; rc=$?; rm -f .mmd/* && rmdir .mmd && exit $rc
 ```
 
 Expected: no errors.
