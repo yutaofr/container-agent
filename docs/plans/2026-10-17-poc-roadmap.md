@@ -3,7 +3,7 @@
 - Date: 2026-10-17
 - Design: [2026-10-17-container-agent-design.md](2026-10-17-container-agent-design.md)
 
-The POC splits into nine milestones (M7 later split into M7a–M7c). Each milestone ends with working, tested software and gets its own detailed plan when it starts; only Milestone 1 is planned in detail today, because later plans depend on what earlier milestones teach us.
+The POC splits into nine milestones (M7 later split into M7a–M7c, M8 into M8a–M8b). Each milestone ends with working, tested software and gets its own detailed plan when it starts; only Milestone 1 is planned in detail today, because later plans depend on what earlier milestones teach us.
 
 ## Dependency graph
 
@@ -18,7 +18,8 @@ flowchart LR
   M7a["M7a Model routing & T1/T2 fixes<br/>Python"]
   M7b["M7b Clarify & project inspection<br/>Go + Python"]
   M7c["M7c Init resources<br/>Go + Python"]
-  M8["M8 Web UI"]
+  M8a["M8a Run & access interfaces<br/>Go + Python"]
+  M8b["M8b Browser interface<br/>Python + HTML"]
   M9["M9 Fault scenarios, eval, E2E"]
 
   M1 --> M3
@@ -30,13 +31,15 @@ flowchart LR
   M6 --> M7a
   M7a --> M7b
   M7b --> M7c
-  M6 --> M8
+  M6 --> M8a
+  M7c --> M8a
+  M8a --> M8b
   M4 --> M9
   M7c --> M9
-  M8 --> M9
+  M8b --> M9
 ```
 
-M1 and M2 share no code and can run in parallel. M3 and M4 can overlap once M3's lifecycle tools exist. M7 was split on 2026-10-18: M7a lands self-healing with model tiers first; M7b's conversational parts can then be tuned alongside M8's web UI. On the same day, init resources (topics, keyspaces, schema scripts) moved from inspection into M7c, so they also serve registered projects ([M7b design](2026-10-18-m7b-clarify-inspection-design.md)).
+M1 and M2 share no code and can run in parallel. M3 and M4 can overlap once M3's lifecycle tools exist. M7 was split on 2026-10-18: M7a lands self-healing with model tiers first; M7b's conversational parts can then be tuned alongside M8's web UI. On the same day, init resources (topics, keyspaces, schema scripts) moved from inspection into M7c, so they also serve registered projects ([M7b design](2026-10-18-m7b-clarify-inspection-design.md)). M8 was split on 2026-10-19: M8a makes runs durable, recoverable, and access-controlled behind an HTTP and SSE interface; M8b builds the pages on the interface M8a verified ([M8 design](2026-10-19-m8-web-ui-design.md)).
 
 ## Milestones
 
@@ -51,7 +54,8 @@ M1 and M2 share no code and can run in parallel. M3 and M4 can overlap once M3's
 | M7a | Model routing & T1/T2 fixes | LiteLLM model gateway with tiers in `platform/models.yaml` (local Ollama for the POC, Bedrock by configuration); rule-based tier choice (cross-service evidence, unknown signatures, failed attempts); Pydantic-validated answers retried once, then a tier up; T1/T2 diagnosis for failures no T0 rule covers; an environment-key allowlist for model-written patches: a patch may set only keys the service already declares (descriptor `runtime.env.required` and `defaults`, `requires[].bind` keys, middleware template `env`), and an undeclared key or an agent-loading value such as `-javaagent:` or `-agentpath:` goes to human approval instead of being applied (the M6 gate's `LD_*`/`DYLD_*` denylist cannot name every code-loading variable, e.g. `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`, `PYTHONPATH`) | With local models on real Docker: a single-service typo fixed on the small tier, a cross-service typo on the large tier, and a fix setting an undeclared key held for approval |
 | M7b | Clarify & project inspection | Clarify: natural-language purpose → valid ClusterSpec, one deterministic question per generator gap (options, default), the model only extracting the first draft; read-only Runner `inspect` (fixed file set, Maven/Gradle modules, resource paths); descriptor drafts for unregistered projects — deterministic name, stack, build, output, model-filled runtime — that the user saves to `.cagent/services/<name>.yaml`; a `dockerfile` stack building from the project's own Dockerfile. Design: [2026-10-18-m7b-clarify-inspection-design.md](2026-10-18-m7b-clarify-inspection-design.md) | Clarify produces a valid ClusterSpec from a prompt; an unregistered single- and multi-module sample project gets a descriptor that builds and runs |
 | M7c | Init resources | Descriptor `requires[].init` gains SQL/CQL scripts, Cassandra keyspaces, and Kafka topics; middleware templates declare how to run them; the generator adds one one-shot `<mw>-init` service per middleware (`service_completed_successfully`); during `build` the Runner stages scripts from the project's own descriptor (workdir) or from the downloaded jar (release, snapshot) into its workspace, mounted read-only; SHA-256 markers in the middleware make reruns safe; init failures escalate `init_failed`; a Cassandra template; drafts map scripts in code and take topics from the model. Design: [2026-10-18-m7c-init-resources-design.md](2026-10-18-m7c-init-resources-design.md) | A sample cluster starts with its MySQL schema, Cassandra keyspace and tables, and Kafka topics created before the application starts; scripts come from a workdir project and a release jar; a second `up` does not rerun them |
-| M8 | Web UI | Chat, YAML diff approval, status panel, live logs, escalation view | A user runs the full flow from the browser |
+| M8a | Run & access interfaces | Runner serial execution across reconnects and a `status` tool; hub instance binding; SQLite store; `RunService` with versioned, idempotent commands and cluster exclusion; whitelisted phase events and timestamped, redacted diagnostic summaries; startup reconciliation and recovery approval; static users, sessions, CSRF, authorization; JSON API and SSE. Design: [2026-10-19-m8-web-ui-design.md](2026-10-19-m8-web-ui-design.md) | Every pending contract works over HTTP; crashes never consume a pending item twice or advance a graph on startup; a real Runner reaches healthy through the API |
+| M8b | Browser interface | Jinja2 + HTMX pages: chat as a transcript with typed action cards, YAML diff approval, status panel with phase events and diagnostic summaries (no continuous log stream), escalation, reconcile and recovery views; SSE client; Playwright tests in CI | A user runs the full flow from the browser (M8 is done) |
 | M9 | Fault scenarios, eval, E2E | Fault-scenario library; per-tier eval harness; POC compose under `deploy/poc`; two real projects end to end | POC success criteria in the design doc are met |
 
 ## Repository layout (target)
