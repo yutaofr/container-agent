@@ -44,10 +44,12 @@ class SimCluster:
         self.init_fails_quietly = init_fails_quietly
         self.compose: dict[str, Any] | None = None
         self.calls: list[str] = []
+        self.requests: list[tuple[str, dict[str, Any]]] = []  # (method, params) per call
         self.builds: list[dict[str, Any]] = []
 
     async def call(self, runner_id: str, method: str, params: dict[str, Any], timeout=None):
         self.calls.append(method)
+        self.requests.append((method, params))
         return getattr(self, f"_{method}")(params)
 
     @staticmethod

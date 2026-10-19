@@ -128,6 +128,32 @@ async def test_findings_need_the_users_allow(catalog):
     assert (await approve(o, "t1", allow=["mysql:field:sysctls"])).outcome == "healthy"
 
 
+async def test_an_approval_lists_every_finding_and_takes_the_full_allow_set(catalog):
+    sim = SimCluster(
+        findings=[
+            {"service": "mysql", "rule": "field:sysctls", "detail": "x"},
+            {"service": "redis", "rule": "cap-add", "detail": "y"},
+        ]
+    )
+    o = orchestrator(sim, catalog)
+    status = await o.start("t1", spec_with(**MIDDLEWARE_ONLY), "laptop-1")
+    assert len(status.waiting["findings"]) == 2 and status.waiting["allow"] == []
+
+    status = await approve(o, "t1", allow=["mysql:field:sysctls"])
+    # redis is still uncovered: the approval comes back, again with every finding
+    assert len(status.waiting["findings"]) == 2
+    assert status.waiting["allow"] == ["mysql:field:sysctls"]
+
+    # the new allow replaces the old one instead of adding to it
+    status = await approve(o, "t1", allow=["redis:cap-add"])
+    assert status.waiting["allow"] == ["redis:cap-add"]
+
+    both = ["mysql:field:sysctls", "redis:cap-add"]
+    assert (await approve(o, "t1", allow=both)).outcome == "healthy"
+    assert all(p["allow"] == [] for m, p in sim.requests if m == "validate")
+    assert [p["allow"] for m, p in sim.requests if m == "up"] == [both]
+
+
 async def test_watch_waits_for_starting_healthchecks(catalog):
     sim = SimCluster(starting_snapshots=3)
     o = orchestrator(sim, catalog)

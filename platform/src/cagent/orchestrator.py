@@ -153,18 +153,26 @@ class Orchestrator:
         await self.graph.ainvoke(self._initial(runner, spec=spec), self._config(thread_id))
         return await self.status(thread_id)
 
-    async def start_from_purpose(self, thread_id: str, purpose: str, runner: str) -> Status:
-        """Start from a sentence: a model drafts the spec, then questions close its gaps."""
+    async def start_from_purpose(
+        self, thread_id: str, purpose: str, runner: str, cluster: str | None = None
+    ) -> Status:
+        """Start from a sentence: a model drafts the spec, then questions close its gaps.
+        With cluster, the spec takes that name instead of the one the model picks."""
         if self.router is None:
             raise ValueError("starting from a purpose needs a model router")
-        await self.graph.ainvoke(self._initial(runner, purpose=purpose), self._config(thread_id))
+        initial = self._initial(runner, purpose=purpose, cluster=cluster)
+        await self.graph.ainvoke(initial, self._config(thread_id))
         return await self.status(thread_id)
 
     def _initial(
-        self, runner: str, spec: ClusterSpec | None = None, purpose: str | None = None
+        self,
+        runner: str,
+        spec: ClusterSpec | None = None,
+        purpose: str | None = None,
+        cluster: str | None = None,
     ) -> State:
         return {
-            "cluster": spec.name if spec else "",
+            "cluster": cluster or (spec.name if spec else ""),
             "runner": runner,
             "purpose": purpose,
             "spec": spec.model_dump() if spec else None,
@@ -273,6 +281,8 @@ class Orchestrator:
             spec = await extract(self.router, state["purpose"], self.catalog)
         except ModelUnavailable as e:
             return self._escalation("model_unavailable", step="extract", detail=str(e))
+        if state["cluster"]:  # the user named the cluster; State and spec must agree
+            spec = ClusterSpec.model_validate({**spec.model_dump(), "name": state["cluster"]})
         return Command(update={"spec": spec.model_dump(), "cluster": spec.name}, goto="generate")
 
     async def _step_generate(self, state: State) -> Command:
@@ -401,9 +411,9 @@ class Orchestrator:
         )
 
     async def _step_validate(self, state: State) -> Command:
-        res = await self._call(
-            state, "validate", compose=to_yaml(state["compose"]), allow=state["allow"]
-        )
+        # Validate without approvals, so every finding is known; the user's allow is the full
+        # set of exceptions for this candidate, and only uncovered findings need approval.
+        res = await self._call(state, "validate", compose=to_yaml(state["compose"]), allow=[])
         if res.exit_code not in (0, 1) or not isinstance(res.output, dict):
             if unchecked := state.get("unchecked"):
                 # A model patch passed the gate but broke the document: undo it and let the
@@ -426,13 +436,14 @@ class Orchestrator:
             return Command(
                 update={**checked, "problems": [asdict(p) for p in problems]}, goto="diagnose"
             )
-        if res.output.get("findings"):
+        findings = res.output.get("findings") or []
+        allowed = set(state["allow"])
+        if any(f"{f['service']}:{f['rule']}" not in allowed for f in findings):
             return Command(
-                update={**checked, "findings": res.output["findings"], "approved": False},
-                goto="approve",
+                update={**checked, "findings": findings, "approved": False}, goto="approve"
             )
         if not state["approved"]:
-            return Command(update={**checked, "findings": []}, goto="approve")
+            return Command(update={**checked, "findings": findings}, goto="approve")
         return Command(update=checked, goto="up" if state["built"] else "build")
 
     async def _step_approve(self, state: State) -> Command:
@@ -441,13 +452,15 @@ class Orchestrator:
                 "kind": "approval",
                 "compose": to_yaml(state["compose"]),
                 "findings": state["findings"],
+                "allow": state["allow"],
                 "fixes": state["fixes"],
             }
         )
         if not decision.get("approve"):
             return Command(update={"outcome": "rejected"}, goto=END)
+        # The decision's allow replaces the old one: it is the complete set for this candidate.
         return Command(
-            update={"approved": True, "allow": decision.get("allow", state["allow"])},
+            update={"approved": True, "allow": list(decision.get("allow") or [])},
             goto="validate",
         )
 
