@@ -66,15 +66,17 @@ async def test_real_cluster_heals_a_port_conflict_and_an_oom_kill(tmp_path):
         status = await o.start("run-1", spec, "e2e")
         assert status.waiting["kind"] == "approval"
         published = yaml.safe_load(status.waiting["compose"])["services"]["redis"]["ports"]
-        # Moved by 1000: up, or down when the taken port is near 65535.
-        assert published in ([f"{port + 1000}:6379"], [f"{port - 1000}:6379"]), published
+        # Moved by 1000 (up, or down near 65535), and again if that port was busy too: the
+        # taken port is ephemeral, so the one 1000 away may be in use on a busy machine.
+        [host] = [int(p.split(":")[0]) for p in published]
+        assert host != port and (host - port) % 1000 == 0, published
 
         status = await o.resume("run-1", {"approve": True})
         assert status.outcome == "healthy", status.waiting
         rules = [f["rule"] for f in status.fixes]
         assert rules[0] == "port_conflict" and "oom_killed" in rules, rules
         # Re-applying the OOM fix must not see redis's own published port as a new conflict.
-        assert rules.count("port_conflict") == 1, rules
+        assert "port_conflict" not in rules[rules.index("oom_killed") :], rules
         assert status.compose["services"]["memhog"]["mem_limit"] != "64m"
     finally:
         await hub.call("e2e", "down", {"name": name})

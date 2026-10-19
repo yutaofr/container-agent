@@ -8,7 +8,7 @@ import asyncio
 import hmac
 import itertools
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any
@@ -27,6 +27,10 @@ HELLO_TIMEOUT = 10.0
 
 class RunnerUnavailable(Exception):
     """The runner is not connected, or disconnected before answering."""
+
+
+class InstanceChanged(RunnerUnavailable):
+    """The runner connected now is another process than the one a call was pinned to."""
 
 
 class RunnerError(Exception):
@@ -55,7 +59,12 @@ class ToolResult:
 class _Runner:
     ws: ServerConnection
     tools: list[str] = field(default_factory=list)
+    instance: str | None = None  # the runner process, unchanged across its reconnects
     pending: dict[int, asyncio.Future] = field(default_factory=dict)
+
+
+# Told about every connection change: (runner id, connected, instance id).
+Listener = Callable[[str, bool, str | None], None]
 
 
 class RunnerHub:
@@ -65,6 +74,15 @@ class RunnerHub:
         self._runners: dict[str, _Runner] = {}
         self._ids = itertools.count(1)
         self._changed = asyncio.Condition()
+        self._listeners: list[Listener] = []
+
+    def add_listener(self, listener: Listener) -> None:
+        """Call listener(runner_id, connected, instance) whenever a runner connects or goes."""
+        self._listeners.append(listener)
+
+    def _tell(self, runner_id: str, runner: "_Runner | None") -> None:
+        for listener in self._listeners:
+            listener(runner_id, runner is not None, runner.instance if runner else None)
 
     def _runner_id(self, request: Request) -> str | None:
         auth = request.headers.get("Authorization", "")
@@ -94,13 +112,17 @@ class RunnerHub:
         if not isinstance(first, dict) or first.get("method") != "hello":
             await ws.close(reason="expected hello")
             return
-        runner = _Runner(ws, tools=list(first.get("params", {}).get("tools", [])))
+        params = first.get("params") or {}
+        runner = _Runner(
+            ws, tools=list(params.get("tools", [])), instance=params.get("instance_id") or None
+        )
         # Swap in the new connection before closing the old one, so no call can be routed
         # to a connection that is already closing.
         async with self._changed:
             old = self._runners.get(runner_id)
             self._runners[runner_id] = runner
             self._changed.notify_all()
+        self._tell(runner_id, runner)
         if old is not None:
             await old.ws.close(reason="replaced by a new connection")
         try:
@@ -113,9 +135,12 @@ class RunnerHub:
                 if not fut.done():
                     fut.set_exception(RunnerUnavailable(f"{runner_id} disconnected"))
             async with self._changed:
-                if self._runners.get(runner_id) is runner:
+                gone = self._runners.get(runner_id) is runner
+                if gone:
                     del self._runners[runner_id]
                 self._changed.notify_all()
+            if gone:
+                self._tell(runner_id, None)
 
     def _receive(self, runner: _Runner, raw: str | bytes) -> None:
         msg = json.loads(raw)
@@ -130,6 +155,11 @@ class RunnerHub:
     def connected(self) -> set[str]:
         return set(self._runners)
 
+    def instance(self, runner_id: str) -> str | None:
+        """The connected runner's process instance, or None when it is not connected."""
+        runner = self._runners.get(runner_id)
+        return runner.instance if runner else None
+
     def tools(self, runner_id: str) -> list[str]:
         runner = self._runners.get(runner_id)
         return list(runner.tools) if runner else []
@@ -140,12 +170,20 @@ class RunnerHub:
             await self._changed.wait_for(lambda: runner_id in self._runners)
 
     async def call(
-        self, runner_id: str, method: str, params: Mapping[str, Any], timeout: float | None = None
+        self,
+        runner_id: str,
+        method: str,
+        params: Mapping[str, Any],
+        timeout: float | None = None,
+        instance: str | None = None,
     ) -> ToolResult:
-        """Call one tool on a runner and return its result."""
+        """Call one tool on a runner and return its result. With instance, the call is sent
+        only if the connected runner is that process, and on the connection just checked."""
         runner = self._runners.get(runner_id)
         if runner is None:
             raise RunnerUnavailable(f"{runner_id} is not connected")
+        if instance is not None and runner.instance != instance:
+            raise InstanceChanged(f"{runner_id} is now instance {runner.instance}, not {instance}")
         call_id = next(self._ids)
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         runner.pending[call_id] = fut
@@ -163,6 +201,15 @@ class RunnerHub:
             output=result.get("output"),
             stderr=result.get("stderr", ""),
         )
+
+
+async def status(hub: RunnerHub, runner_id: str) -> dict[str, Any]:
+    """The runner's own report: {instance_id, active, queued}. It answers even while a long
+    call runs, because the runner handles status outside its call queue."""
+    res = await hub.call(runner_id, "status", {})
+    if not res.ok or not isinstance(res.output, dict):
+        raise RunnerError(0, f"status failed: {res.stderr}")
+    return res.output
 
 
 async def start(hub: RunnerHub, host: str, port: int) -> Server:

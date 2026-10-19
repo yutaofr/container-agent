@@ -309,7 +309,35 @@ Every task ships its own tests; a final task combines them.
 
 **M8b** (planned after M8a merges): each pending view, the reconcile and recovery pages, refresh and reconnect, several tabs, session expiry, escaping of logs and model text, and init success and failure, in Playwright, plus a CI browser job.
 
-## 14. Out of scope and follow-ups
+## 14. HTTP interface (M8a, input to M8b)
+
+| Method | Path | Body or parameters | Answer |
+|---|---|---|---|
+| GET | `/login` | — | `{csrf}`; sets the `cagent_pre` cookie |
+| POST | `/login` | form `token`, `csrf`; `Origin` | `{user, csrf}`; sets `cagent_session`, clears `cagent_pre` |
+| POST | `/logout` | `X-CSRF-Token`, `Origin` | `{ok}`; closes the session's event streams |
+| GET | `/api/runs` | — | the user's runs |
+| POST | `/api/runs` | `{command_id, runner, cluster, purpose \| spec}` | `202 {command_id, run_id, accepted_revision, execution_id}` |
+| GET | `/api/runs/{id}` | — | the snapshot (section 11) |
+| POST | `/api/runs/{id}/commands` | `{command_id, expected_revision, action, pending_id?, decision?}`, `action` ∈ `answer`, `refresh`, `review_recovery`, `abandon` | `202 {command_id, run_id, accepted_revision, execution_id}`; `Cagent-Replay: true` on a repeat |
+| GET | `/api/runs/{id}/commands/{command_id}` | — | `{command_id, kind, status, effect, reason, response}` |
+| GET | `/api/runs/{id}/events` | `Last-Event-ID` or `?after=` | `text/event-stream` (section 11) |
+
+Errors are `{error, detail?, snapshot?}`: `401 login_required`, `401 login_failed`, `403 bad_origin`, `403 bad_csrf`, `404 not_found`, `409 stale | not_waiting | not_reconcile | command_id_reused | cluster_name_taken | cluster_busy | runner_offline | runner_unavailable | check_needed | no_compose | plan_stale` (stale ones carry the snapshot), `422 invalid_command | invalid_decision | invalid_cluster | invalid_input | invalid_spec | bad_cursor`, `429 rate_limited | too_many_streams`, `503 shutting_down`.
+
+`refresh` is read-only and ignores `expected_revision`; every other command checks it. Configuration: [`platform/platform.example.yaml`](../../platform/platform.example.yaml); `orchestrator` holds the state machine's timings.
+
+## 15. Implementation findings (M8a)
+
+- **A node that raises ends `astream` without a task result** (LangGraph 1.2.16). The adapter therefore reports `phase_failed` itself for every task still started, then re-raises.
+- **A resumed node reports a task start again, with the same task id.** Events are keyed by `execution_id + task_id`, and the store numbers them.
+- **Approval and recovery digests agree.** An approval record's `candidate_digest` is the SHA-256 of the compose YAML shown, the same function recovery plans use, so "the compose changed since it was approved" is never a false alarm.
+- **`validate` now always runs with an empty `allow`.** The approval payload carries the current `allow` so a page can pre-select it; `up` still passes the approved set, and the Runner's `-allow-rule` ceiling still applies.
+- **`status` is a normal tool result** (`exit_code` 0, the report as output), so the hub's call path needed no special case.
+- **Behind a TLS proxy every client has the proxy's address**, because proxy headers are never trusted; login rate limits are then shared by all users. Acceptable for the POC; a deployment that needs per-client limits must terminate TLS in the platform. Recorded, not changed.
+- Measurements on the dev machine: the three `kill -9` scenarios take ~7.4 s together; the real-Docker run over HTTP ~11 s; the Runner's serve tests pass 20 times in a row under `-race`.
+
+## 16. Out of scope and follow-ups
 
 - Continuous log streaming (Runner log events with redaction, rate limits, backpressure, and gap handling).
 - Destroying a cluster from the browser: needs a Runner deletion preview, ownership checks, cluster-wide exclusion, and confirmation of the result. The future page is a separate confirmation that asks for the cluster name.

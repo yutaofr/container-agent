@@ -8,7 +8,14 @@ import pytest
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import InvalidStatus
 
-from cagent.hub import RunnerError, RunnerHub, RunnerUnavailable, start
+from cagent.hub import (
+    InstanceChanged,
+    RunnerError,
+    RunnerHub,
+    RunnerUnavailable,
+    start,
+    status,
+)
 
 TOKEN = "t-123"
 
@@ -23,12 +30,13 @@ async def hub():
     await server.wait_closed()
 
 
-async def fake_runner(url: str, answer: Callable[[dict], dict | None], token: str = TOKEN):
+async def fake_runner(
+    url: str, answer: Callable[[dict], dict | None], token: str = TOKEN, instance: str = "i-1"
+):
     """Connect, say hello, and answer each request with answer(request); None means stay silent."""
     ws = await connect(url, additional_headers={"Authorization": f"Bearer {token}"})
-    await ws.send(
-        json.dumps({"jsonrpc": "2.0", "method": "hello", "params": {"tools": ["validate"]}})
-    )
+    hello = {"tools": ["validate"], "instance_id": instance}
+    await ws.send(json.dumps({"jsonrpc": "2.0", "method": "hello", "params": hello}))
 
     async def loop():
         async for raw in ws:
@@ -44,8 +52,8 @@ def echo(req: dict) -> dict:
     return {"result": {"exit_code": 0, "output": {"echo": req["params"]}, "stderr": ""}}
 
 
-async def connected(hub: RunnerHub, url: str, answer=echo) -> ClientConnection:
-    ws, _ = await fake_runner(url, answer)
+async def connected(hub: RunnerHub, url: str, answer=echo, instance="i-1") -> ClientConnection:
+    ws, _ = await fake_runner(url, answer, instance=instance)
     await hub.wait_for_runner("laptop-1", timeout=5)
     return ws
 
@@ -122,3 +130,47 @@ async def test_runner_counts_as_connected_only_after_hello(hub):
     await ws.wait_closed()
     assert ws.close_reason == "expected hello"
     assert h.connected() == set()
+
+
+async def test_hub_knows_each_runners_instance(hub):
+    h, url = hub
+    assert h.instance("laptop-1") is None
+    ws = await connected(h, url, instance="i-1")
+    assert h.instance("laptop-1") == "i-1"
+    await ws.close()
+    await connected(h, url, instance="i-2")
+    assert h.instance("laptop-1") == "i-2"
+
+
+async def test_a_pinned_call_goes_only_to_its_instance(hub):
+    h, url = hub
+    sent = []
+    await connected(h, url, lambda req: sent.append(req) or echo(req), instance="i-2")
+    with pytest.raises(InstanceChanged):
+        await h.call("laptop-1", "up", {"name": "demo"}, instance="i-1")
+    assert sent == []  # refused before anything was sent
+    assert (await h.call("laptop-1", "up", {"name": "demo"}, instance="i-2")).ok
+
+
+async def test_listeners_hear_connects_and_disconnects(hub):
+    h, url = hub
+    heard = []
+    h.add_listener(lambda runner, up, instance: heard.append((runner, up, instance)))
+    ws = await connected(h, url, instance="i-1")
+    await ws.close()
+    async with asyncio.timeout(5):
+        while len(heard) < 2:
+            await asyncio.sleep(0.01)
+    assert heard == [("laptop-1", True, "i-1"), ("laptop-1", False, None)]
+
+
+async def test_status_returns_the_runners_report(hub):
+    h, url = hub
+    report = {"instance_id": "i-1", "active": None, "queued": {}}
+
+    def answer(req):
+        assert req["method"] == "status" and req["params"] == {}
+        return {"result": {"exit_code": 0, "output": report}}
+
+    await connected(h, url, answer)
+    assert await status(h, "laptop-1") == report

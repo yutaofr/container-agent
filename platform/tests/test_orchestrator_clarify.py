@@ -70,6 +70,17 @@ async def test_a_purpose_becomes_a_spec_one_question_at_a_time(catalog):
     assert sim.builds[0]["maven"] == "com.acme:order-service:1.4.2:jar"
 
 
+async def test_the_user_names_the_cluster(catalog):
+    sim = SimCluster()
+    script = {"fake/large": [extraction([], [{"template": "redis"}])]}
+    o = orchestrator(sim, catalog, script)
+    status = await o.start_from_purpose("t1", "a redis", "laptop-1", cluster="my-cache")
+    assert status.waiting["kind"] == "approval"
+    assert [p["name"] for m, p in sim.requests] == ["my-cache"]
+    snap = await o.graph.aget_state(o._config("t1"))
+    assert snap.values["cluster"] == snap.values["spec"]["name"] == "my-cache"
+
+
 async def test_aborting_a_question_ends_the_run(catalog):
     script = {"fake/large": [extraction([ORDERS], [{"template": "mysql", "version": "5.7"}])]}
     o = orchestrator(SimCluster(), catalog, script)

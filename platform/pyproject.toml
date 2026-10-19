@@ -4,20 +4,26 @@ version = "0.1.0"
 description = "Container Agent platform: catalog, generator, orchestrator"
 requires-python = ">=3.12"
 dependencies = [
+    "aiosqlite>=0.22.1",
+    "fastapi>=0.146.0",
     "jsonpatch>=1.33",
     "langgraph>=1.2",
+    "langgraph-checkpoint-sqlite>=3.1.2",
     "litellm>=1.106",
     "packaging>=24",
     "pydantic>=2.9",
     "pyyaml>=6.0",
+    "uvicorn>=0.54.0",
     "websockets>=14",
 ]
 
 [project.scripts]
 cagent-gen = "cagent.cli:main"
+cagent-platform = "cagent.server:main"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=8.3",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.8",
