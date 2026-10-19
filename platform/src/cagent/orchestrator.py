@@ -126,7 +126,7 @@ class Status:
 EventSink = Callable[[dict[str, Any]], Awaitable[None]]
 
 
-def _service_summary(s: dict[str, Any]) -> dict[str, Any]:
+def service_summary(s: dict[str, Any]) -> dict[str, Any]:
     """What an observation shows of one service, from the Runner's redacted snapshot."""
     return {
         "service": s.get("service"),
@@ -654,7 +654,7 @@ class Orchestrator:
         write = get_stream_writer()
         out = res.output
         if res.ok and isinstance(out, dict) and isinstance(out.get("services"), list):
-            services = [_service_summary(s) for s in out["services"]]
+            services = [service_summary(s) for s in out["services"]]
             write({"type": "observation", "received_at": received_at, "services": services})
             return out
         reason = f"snapshot exited {res.exit_code}: {(res.stderr or 'no output')[-300:]}"

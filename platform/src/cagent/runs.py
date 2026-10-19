@@ -24,8 +24,9 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from cagent.catalog import NAME_PATTERN
 from cagent.dispatch import MUTATING, Execution, current
-from cagent.hub import RunnerHub
-from cagent.orchestrator import EventSink, Orchestrator, Status
+from cagent.hub import RunnerHub, status
+from cagent.orchestrator import EventSink, Orchestrator, Status, service_summary
+from cagent.recovery import RESUME, build_plan, facts_of, make_recovery_initial
 from cagent.spec import ClusterSpec
 from cagent.store import ACTIVE_STATES, Store
 
@@ -179,6 +180,13 @@ class RunService:
         self._locks: dict[str, asyncio.Lock] = {}
         self._background: set[asyncio.Task] = set()
         self._runner_lock = asyncio.Lock()
+        catalog = orchestrator.catalog
+        self.catalog_digest = digest(
+            {
+                "services": {k: v.model_dump(mode="json") for k, v in catalog.services.items()},
+                "middleware": {k: v.model_dump(mode="json") for k, v in catalog.middleware.items()},
+            }
+        )
 
     async def close(self) -> None:
         """Stop accepting commands, then stop the executions. Each records why it stopped;
@@ -434,38 +442,64 @@ class RunService:
         return run
 
     async def _answer(self, user: str, run_id: str, env: Envelope, dig: str) -> Accepted:
+        async with self.store.read() as t:
+            run = await self._waiting(t, run_id, env)
+            pending = run["pending"]
+            decision = check_decision(pending["kind"], pending["payload"], env.decision or {})
+        plan = None
+        if pending["kind"] == "recovery":
+            plan = await self._plan(pending["payload"]["plan_id"])
+            if decision["approve"]:
+                await self._confirm_plan(run, plan)  # outside any transaction
         async with self.store.tx() as t:
             if replay := await self._replay(t, user, env.command_id, dig):
                 return replay
-            run = await self._current(t, run_id, env, "waiting")
-            pending = run["pending"]
-            if env.pending_id != pending["pending_id"]:
-                raise RunError(409, "stale", snapshot=await self._snapshot_in(t, run))
-            decision = check_decision(pending["kind"], pending["payload"], env.decision or {})
-            now = self.clock()
-            if pending["kind"] in ("approval", "patch_approval"):
+            run = await self._waiting(t, run_id, env)  # again, inside Tx1
+            pending, now = run["pending"], self.clock()
+            if pending["kind"] in ("approval", "patch_approval", "recovery"):
                 await self._record_approval(t, user, run_id, pending, decision, now)
+            if plan is not None and not decision["approve"]:
+                await t.update("plans", {"id": plan["id"]}, invalidated_at=now)
+                body = await self._accept(
+                    t, user, run, env.command_id, dig, now, None, "reconcile", "done"
+                )
+                return Accepted(body)
             execution_id = self.new_id()
-            instance = self.hub.instance(run["runner"])
-            body = await self._accept(
-                t, user, run, env.command_id, dig, now, execution_id=execution_id
-            )
+            extra: dict[str, Any] = {}
+            if plan is not None:
+                thread = f"{run_id}.{run['executions'] + 1}"
+                instance = plan["facts"]["instance_id"]  # the instance the plan checked
+                last = await t.one("SELECT MAX(call_id) AS n FROM dispatches")
+                extra = {
+                    "thread_id": thread,
+                    "recovery": {
+                        "plan_id": plan["id"],
+                        "marks": plan["content"]["marks"],
+                        "after_call_id": last["n"] or 0,
+                    },
+                }
+            else:
+                thread, instance = run["thread_id"], self.hub.instance(run["runner"])
+            body = await self._accept(t, user, run, env.command_id, dig, now, execution_id)
             await t.update_run(
                 run_id,
-                pending=None,
                 execution_id=execution_id,
                 executions=run["executions"] + 1,
                 execution_instance=instance,
+                **extra,
             )
-        thread = run["thread_id"]
-        self._launch(
-            run_id,
-            execution_id,
-            instance,
-            (user, env.command_id),
-            lambda sink: self.orch.resume(thread, decision, on_event=sink),
-        )
+        if plan is not None:
+            work = self._recovery_work(run, plan, thread)
+        else:
+            work = lambda sink: self.orch.resume(thread, decision, on_event=sink)  # noqa: E731
+        self._launch(run_id, execution_id, instance, (user, env.command_id), work)
         return Accepted(body)
+
+    async def _waiting(self, t, run_id: str, env: Envelope) -> dict[str, Any]:
+        run = await self._current(t, run_id, env, "waiting")
+        if env.pending_id != run["pending"]["pending_id"]:
+            raise RunError(409, "stale", snapshot=await self._snapshot_in(t, run))
+        return run
 
     async def _accept(
         self,
@@ -479,9 +513,13 @@ class RunService:
         state: str = "running",
         status: str = "accepted",
         kind: str = "answer",
+        pending: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Record an accepted command and move the run to state, in the caller's Tx1."""
+        """Record an accepted command and move the run to state with pending (or none), in
+        the caller's Tx1."""
         revision = await t.bump_revision(run["id"])
+        if pending is not None:
+            pending = {**pending, "revision": revision}
         body = {
             "command_id": command_id,
             "run_id": run["id"],
@@ -501,11 +539,261 @@ class RunService:
             execution_id=execution_id,
             at=now,
         )
-        await t.update_run(run["id"], state=state)
+        await t.update_run(run["id"], state=state, pending=pending)
+        pending_id = pending["pending_id"] if pending else None
         await t.append_event(
-            run["id"], "run_state", {"state": state, "revision": revision, "pending_id": None}
+            run["id"], "run_state", {"state": state, "revision": revision, "pending_id": pending_id}
         )
         return body
+
+    # --- reconciliation and recovery --------------------------------------------------------
+
+    def _reconcilable(self, run: dict[str, Any]) -> bool:
+        pending = run["pending"]
+        return run["state"] == "reconcile" or (
+            run["state"] == "waiting" and pending is not None and pending["kind"] == "recovery"
+        )
+
+    @staticmethod
+    def _busy(report: dict[str, Any], cluster: str) -> bool:
+        active = report.get("active")
+        return bool(active and active.get("cluster") == cluster) or bool(
+            (report.get("queued") or {}).get(cluster)
+        )
+
+    async def _refresh(self, user: str, run_id: str, env: Envelope, dig: str) -> Accepted:
+        """A read-only check: is the Runner idle for this cluster, and what runs there now?
+        It changes no state, unless what it finds invalidates the recovery plan."""
+        async with self.store.read() as t:
+            run = await t.get_run(run_id)
+            if not self._reconcilable(run):
+                raise RunError(409, "not_reconcile", snapshot=await self._snapshot_in(t, run))
+        if self.hub.instance(run["runner"]) is None:
+            raise RunError(409, "runner_offline")
+        body = {
+            "command_id": env.command_id,
+            "run_id": run_id,
+            "accepted_revision": run["revision"],
+            "execution_id": None,
+        }
+        async with self.store.tx() as t:
+            if replay := await self._replay(t, user, env.command_id, dig):
+                return replay
+            await t.insert(
+                "commands",
+                user=user,
+                command_id=env.command_id,
+                run_id=run_id,
+                kind="refresh",
+                **{"class": "read_only"},
+                digest=dig,
+                response=body,
+                status="accepted",
+                at=self.clock(),
+            )
+        try:
+            report = await status(self.hub, run["runner"])
+        except Exception as e:
+            async with self.store.tx() as t:
+                await t.update(
+                    "commands",
+                    {"user": user, "command_id": env.command_id},
+                    status="interrupted",
+                    reason=f"{type(e).__name__}: {e}",
+                )
+            raise RunError(409, "runner_unavailable", str(e)) from None
+        instance = report["instance_id"]
+        idle = not self._busy(report, run["cluster"])
+        check = {
+            "at": self.clock(),
+            "instance_id": instance,
+            "idle": idle,
+            "same_instance": (
+                instance == run["execution_instance"] if run["execution_instance"] else None
+            ),
+        }
+        observation, failure = None, None
+        if idle:
+            try:
+                res = await self.hub.call(
+                    run["runner"], "snapshot", {"name": run["cluster"]}, instance=instance
+                )
+                out = res.output
+                if res.ok and isinstance(out, dict) and isinstance(out.get("services"), list):
+                    services = [service_summary(s) for s in out["services"]]
+                    observation = {"received_at": self.clock(), "services": services}
+                else:
+                    failure = f"snapshot exited {res.exit_code}: {(res.stderr or '')[-300:]}"
+            except Exception as e:
+                failure = f"{type(e).__name__}: {e}"
+        async with self.store.tx() as t:
+            run = await t.get_run(run_id)
+            await t.update_run(run_id, last_check=check)
+            if observation is not None:
+                seq = await t.append_event(run_id, "observation", observation)
+                observation = {**observation, "seq": seq}
+                await t.update_run(
+                    run_id,
+                    last_observation=observation,
+                    last_observation_attempt={"at": check["at"], "ok": True, "reason": None},
+                )
+            elif failure is not None:
+                payload = {"received_at": check["at"], "reason": failure}
+                await t.append_event(run_id, "observation_failed", payload)
+                await t.update_run(
+                    run_id,
+                    last_observation_attempt={"at": check["at"], "ok": False, "reason": failure},
+                )
+            if run["state"] == "waiting" and run["pending"]["kind"] == "recovery":
+                plan = await t.one(
+                    "SELECT * FROM plans WHERE id = ?", run["pending"]["payload"]["plan_id"]
+                )
+                seen = observation or run["last_observation"]
+                now_facts = {**plan["facts"], **facts_of(check, seen)}
+                if not idle or now_facts != plan["facts"]:
+                    await self._invalidate(t, run, plan["id"])
+            await t.update("commands", {"user": user, "command_id": env.command_id}, status="done")
+        return Accepted(body)
+
+    async def _invalidate(self, t, run: dict[str, Any], plan_id: str) -> None:
+        """The plan no longer matches the facts: withdraw it and return to reconcile."""
+        await t.update("plans", {"id": plan_id}, invalidated_at=self.clock())
+        revision = await t.bump_revision(run["id"])
+        await t.update_run(run["id"], state="reconcile", pending=None)
+        await t.append_event(
+            run["id"], "run_state", {"state": "reconcile", "revision": revision, "pending_id": None}
+        )
+
+    async def _review_recovery(self, user: str, run_id: str, env: Envelope, dig: str) -> Accepted:
+        """Build a recovery plan from records and publish it for approval."""
+        async with self.store.read() as t:
+            run = await self._current(t, run_id, env, "reconcile")
+        check = run["last_check"]
+        if not check or not check["idle"]:
+            raise RunError(409, "check_needed", "refresh while the Runner is idle first")
+        values, source = None, None
+        if run["executions"] > 0:  # resume the run's own execution, which needs a compose
+            values, checkpoint_id = await self.orch.checkpoint(run["thread_id"])
+            if not values.get("compose"):
+                raise RunError(409, "no_compose", "abandon this run and start a new one")
+            source = {"thread_id": run["thread_id"], "checkpoint_id": checkpoint_id}
+        async with self.store.tx() as t:
+            if replay := await self._replay(t, user, env.command_id, dig):
+                return replay
+            run = await self._current(t, run_id, env, "reconcile")
+            approved = await t.one(
+                "SELECT * FROM approvals WHERE run_id = ? AND kind = 'approval'"
+                " AND json_extract(decision, '$.approve') = 1 ORDER BY at DESC LIMIT 1",
+                run_id,
+            )
+            sent = await t.all(
+                "SELECT method FROM dispatches WHERE execution_id = ?", run["execution_id"] or ""
+            )
+            cluster = await t.get_cluster(run["runner"], run["cluster"])
+            plan = build_plan(
+                values=values,
+                last_approved=approved,
+                check=run["last_check"],
+                observation=run["last_observation"],
+                dispatched=[d["method"] for d in sent],
+                marks=cluster["marks"],
+                catalog_digest=self.catalog_digest,
+            )
+            now, plan_id = self.clock(), self.new_id()
+            content = {**plan.content, "source": source, "required": plan.required}
+            await t.insert(
+                "plans",
+                id=plan_id,
+                run_id=run_id,
+                mode=plan.mode,
+                digest=plan.digest,
+                based_on_observation_seq=(run["last_observation"] or {}).get("seq", 0),
+                facts=plan.facts,
+                content=content,
+                created_at=now,
+            )
+            pending = {
+                "pending_id": self.new_id(),
+                "kind": "recovery",
+                "created_at": now,
+                "payload": {**content, "plan_id": plan_id, "digest": plan.digest},
+                "interrupt_id": None,
+            }
+            body = await self._accept(
+                t,
+                user,
+                run,
+                env.command_id,
+                dig,
+                now,
+                execution_id=None,
+                state="waiting",
+                status="done",
+                kind="review_recovery",
+                pending=pending,
+            )
+        return Accepted(body)
+
+    async def _plan(self, plan_id: str) -> dict[str, Any]:
+        async with self.store.read() as t:
+            return await t.one("SELECT * FROM plans WHERE id = ?", plan_id)
+
+    async def _confirm_plan(self, run: dict[str, Any], plan: dict[str, Any]) -> None:
+        """Before an approved recovery runs: the Runner must still be the instance the plan
+        checked, and idle for this cluster. Otherwise the plan is withdrawn."""
+        try:
+            report = await status(self.hub, run["runner"])
+        except Exception as e:
+            raise RunError(409, "runner_unavailable", str(e)) from None
+        if report["instance_id"] == plan["facts"]["instance_id"] and not self._busy(
+            report, run["cluster"]
+        ):
+            return
+        async with self.store.tx() as t:
+            current_run = await t.get_run(run["id"])
+            if current_run["revision"] == run["revision"]:
+                await self._invalidate(t, current_run, plan["id"])
+        raise RunError(409, "plan_stale", "the Runner changed since the plan was made")
+
+    def _recovery_work(self, run: dict[str, Any], plan: dict[str, Any], thread: str) -> Work:
+        content = plan["content"]
+        if plan["mode"] != RESUME:  # a new run on a marked cluster starts normally
+            inp = run["input"]
+            return self._start_work(
+                thread, run["runner"], run["cluster"], inp.get("purpose"), inp.get("spec")
+            )
+
+        async def work(sink: EventSink) -> Status:
+            values, _ = await self.orch.checkpoint(content["source"]["thread_id"])
+            deadline = self.clock() + self.orch.settings.deadline_s
+            initial = make_recovery_initial(content, values, deadline, content["source"])
+            return await self.orch.start_recovery(thread, initial, on_event=sink)
+
+        return work
+
+    async def _abandon(self, user: str, run_id: str, env: Envelope, dig: str) -> Accepted:
+        """End orchestration. Containers, volumes, and the cluster's marks stay as they are."""
+        async with self.store.tx() as t:
+            if replay := await self._replay(t, user, env.command_id, dig):
+                return replay
+            run = await t.get_run(run_id)
+            if not self._reconcilable(run):
+                raise RunError(409, "not_reconcile", snapshot=await self._snapshot_in(t, run))
+            if env.expected_revision != run["revision"]:
+                raise RunError(409, "stale", snapshot=await self._snapshot_in(t, run))
+            now = self.clock()
+            if run["pending"]:
+                plan_id = run["pending"]["payload"]["plan_id"]
+                await t.update("plans", {"id": plan_id}, invalidated_at=now)
+            body = await self._accept(
+                t, user, run, env.command_id, dig, now, None, "abandoned", "done", "abandon"
+            )
+            await t.update(
+                "clusters",
+                {"runner": run["runner"], "name": run["cluster"], "lock_run_id": run_id},
+                lock_run_id=None,
+            )
+        return Accepted(body)
 
     async def _record_approval(
         self,
@@ -831,6 +1119,8 @@ class RunService:
                 state = TERMINAL[status.outcome]
                 if state == "healthy":
                     values["verified_at"] = now
+                    if run["recovery"]:
+                        await self._clear_marks(t, run)
                 await t.update(
                     "clusters",
                     {"runner": run["runner"], "name": run["cluster"], "lock_run_id": run_id},
@@ -858,6 +1148,25 @@ class RunService:
                 },
                 execution_id,
             )
+
+    @staticmethod
+    async def _clear_marks(t, run: dict[str, Any]) -> None:
+        """A recovery chain passed acceptance: clear the marks its plan named, unless one of
+        its own mutating calls is still unconfirmed. Marks added meanwhile stay."""
+        rec = run["recovery"]
+        marks = ", ".join("?" for _ in MUTATING)
+        open_ = await t.one(
+            "SELECT COUNT(*) AS n FROM dispatches WHERE run_id = ? AND call_id > ?"
+            f" AND result_at IS NULL AND method IN ({marks})",
+            run["id"],
+            rec["after_call_id"],
+            *sorted(MUTATING),
+        )
+        if open_["n"]:
+            return
+        cluster = await t.get_cluster(run["runner"], run["cluster"])
+        kept = [m for m in cluster["marks"] if m["id"] not in rec["marks"]]
+        await t.update("clusters", {"runner": run["runner"], "name": run["cluster"]}, marks=kept)
 
     @staticmethod
     async def _previous_approved(t, run_id: str) -> dict[str, Any] | None:
