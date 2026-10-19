@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 cagent-gen = "cagent.cli:main"
+cagent-platform = "cagent.server:main"
 
 [dependency-groups]
 dev = [
