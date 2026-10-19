@@ -17,9 +17,9 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from cagent.catalog import NAME_PATTERN
 from cagent.dispatch import Execution, current
@@ -56,6 +56,79 @@ PAYLOAD_FIELDS = {
         "fixes",
     ),
 }
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class Envelope(_Strict):
+    """Every command on an existing run."""
+
+    command_id: str = Field(min_length=1, max_length=128)
+    expected_revision: int | None = None
+    action: Literal["answer", "refresh", "review_recovery", "abandon"]
+    pending_id: str | None = None
+    decision: dict[str, Any] | None = None
+
+
+class _Answer(_Strict):
+    answer: Any  # required; null takes the question's default
+
+
+class _Abort(_Strict):
+    action: Literal["abort"]
+
+
+class _Saved(_Strict):
+    saved: Literal[True]  # asks for a read-back; it does not mean the file is valid
+
+
+class _Approval(_Strict):
+    approve: StrictBool
+    allow: list[str] = []
+
+
+class _PatchApproval(_Strict):
+    approve: StrictBool
+
+
+class _Escalation(_Strict):
+    action: Literal["retry", "abort"]
+
+
+class _Recovery(_Strict):
+    approve: StrictBool
+    acknowledged: list[str] = []
+
+
+def check_decision(kind: str, payload: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+    """Validate a decision for a pending item strictly; raise a 422 RunError otherwise."""
+    models: dict[str, type[_Strict]] = {
+        "question": _Abort if "action" in decision else _Answer,
+        "save_descriptors": _Abort if "action" in decision else _Saved,
+        "approval": _Approval,
+        "patch_approval": _PatchApproval,
+        "escalation": _Escalation,
+        "recovery": _Recovery,
+    }
+    try:
+        d = models[kind].model_validate(decision).model_dump()
+    except ValidationError as e:
+        raise RunError(422, "invalid_decision", str(e)) from None
+    if kind == "approval":
+        findings = {f"{f['service']}:{f['rule']}" for f in payload["findings"]}
+        if not d["approve"] and d["allow"]:
+            raise RunError(422, "invalid_decision", "a rejection allows nothing")
+        if len(set(d["allow"])) != len(d["allow"]) or not set(d["allow"]) <= findings:
+            raise RunError(422, "invalid_decision", "allow names only this candidate's findings")
+    if kind == "recovery":
+        acks = d["acknowledged"]
+        if d["approve"] and (len(set(acks)) != len(acks) or set(acks) != set(payload["required"])):
+            raise RunError(422, "invalid_decision", "acknowledge exactly the required risks")
+        if not d["approve"] and acks:
+            raise RunError(422, "invalid_decision", "a rejection acknowledges nothing")
+    return d
 
 
 class RunError(Exception):
@@ -196,6 +269,150 @@ class RunService:
         if row is None:
             raise not_found()
         return {k: row[k] for k in ("command_id", "kind", "status", "effect", "reason", "response")}
+
+    async def _snapshot_in(self, t, run: dict[str, Any]) -> dict[str, Any]:
+        runner = await t.one("SELECT * FROM runner_status WHERE runner = ?", run["runner"])
+        return self._view(run, runner)
+
+    # --- commands on a run ------------------------------------------------------------------
+
+    async def submit(self, user: str, run_id: str, body: dict[str, Any]) -> Accepted:
+        """Accept one command on a run. Checks run in this order: access, the idempotency
+        record, then (new commands only) revision and pending item, then the decision."""
+        self._check_accepting()
+        try:
+            env = Envelope.model_validate(body)
+        except ValidationError as e:
+            raise RunError(422, "invalid_command", str(e)) from None
+        async with self.store.read() as t:
+            self._visible(user, await t.get_run(run_id))
+        dig = digest(
+            {
+                "run_id": run_id,
+                "action": env.action,
+                "pending_id": env.pending_id,
+                "decision": env.decision,
+            }
+        )
+        async with self.store.read() as t:
+            if replay := await self._replay(t, user, env.command_id, dig):
+                return replay
+        handler = getattr(self, f"_{env.action}")
+        async with self._lock(run_id):
+            return await handler(user, run_id, env, dig)
+
+    async def _current(self, t, run_id: str, env: Envelope, state: str) -> dict[str, Any]:
+        """The run, if it is in state at the revision the command expects; else a 409."""
+        run = await t.get_run(run_id)
+        if run["state"] != state:
+            raise RunError(409, f"not_{state}", snapshot=await self._snapshot_in(t, run))
+        if env.expected_revision != run["revision"]:
+            raise RunError(409, "stale", snapshot=await self._snapshot_in(t, run))
+        return run
+
+    async def _answer(self, user: str, run_id: str, env: Envelope, dig: str) -> Accepted:
+        async with self.store.tx() as t:
+            if replay := await self._replay(t, user, env.command_id, dig):
+                return replay
+            run = await self._current(t, run_id, env, "waiting")
+            pending = run["pending"]
+            if env.pending_id != pending["pending_id"]:
+                raise RunError(409, "stale", snapshot=await self._snapshot_in(t, run))
+            decision = check_decision(pending["kind"], pending["payload"], env.decision or {})
+            now = self.clock()
+            if pending["kind"] in ("approval", "patch_approval"):
+                await self._record_approval(t, user, run_id, pending, decision, now)
+            execution_id = self.new_id()
+            instance = self.hub.instance(run["runner"])
+            body = await self._accept(
+                t, user, run, env.command_id, dig, now, execution_id=execution_id
+            )
+            await t.update_run(
+                run_id,
+                pending=None,
+                execution_id=execution_id,
+                executions=run["executions"] + 1,
+                execution_instance=instance,
+            )
+        thread = run["thread_id"]
+        self._launch(
+            run_id,
+            execution_id,
+            instance,
+            (user, env.command_id),
+            lambda sink: self.orch.resume(thread, decision, on_event=sink),
+        )
+        return Accepted(body)
+
+    async def _accept(
+        self,
+        t,
+        user: str,
+        run: dict[str, Any],
+        command_id: str,
+        dig: str,
+        now: float,
+        execution_id: str | None,
+        state: str = "running",
+        status: str = "accepted",
+        kind: str = "answer",
+    ) -> dict[str, Any]:
+        """Record an accepted command and move the run to state, in the caller's Tx1."""
+        revision = await t.bump_revision(run["id"])
+        body = {
+            "command_id": command_id,
+            "run_id": run["id"],
+            "accepted_revision": revision,
+            "execution_id": execution_id,
+        }
+        await t.insert(
+            "commands",
+            user=user,
+            command_id=command_id,
+            run_id=run["id"],
+            kind=kind,
+            **{"class": "advancing"},
+            digest=dig,
+            response=body,
+            status=status,
+            execution_id=execution_id,
+            at=now,
+        )
+        await t.update_run(run["id"], state=state)
+        await t.append_event(
+            run["id"], "run_state", {"state": state, "revision": revision, "pending_id": None}
+        )
+        return body
+
+    async def _record_approval(
+        self,
+        t,
+        user: str,
+        run_id: str,
+        pending: dict[str, Any],
+        decision: dict[str, Any],
+        now: float,
+    ) -> None:
+        """An immutable record of what was shown and what the person decided."""
+        payload, kind = pending["payload"], pending["kind"]
+        if kind == "approval":  # the same digest recovery plans compare against
+            shown = hashlib.sha256(payload["compose"].encode()).hexdigest()
+        elif kind == "patch_approval":
+            shown = digest(payload["patch"])
+        else:
+            shown = payload["digest"]
+        await t.insert(
+            "approvals",
+            id=self.new_id(),
+            run_id=run_id,
+            pending_id=pending["pending_id"],
+            kind=kind,
+            candidate_digest=shown,
+            content=payload,
+            decision=decision,
+            user=user,
+            at=now,
+        )
 
     # --- creating a run ----------------------------------------------------------------------
 
