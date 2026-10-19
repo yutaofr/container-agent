@@ -9,12 +9,13 @@ Routes only translate HTTP to RunService calls and back.
 from typing import Annotated, Any
 from urllib.parse import parse_qs
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from cagent.auth import LoginError, RateLimited, Session, Sessions
+from cagent.events import BadCursor, EventStreamResponse, StreamLimits, event_stream, parse_cursor
 from cagent.runs import Accepted, RunError, RunService
 
 SESSION_COOKIE = "cagent_session"
@@ -51,8 +52,14 @@ def _accepted(acc: Accepted) -> JSONResponse:
 
 
 def create_app(
-    service: RunService, sessions: Sessions, origin: str, secure_cookies: bool
+    service: RunService,
+    sessions: Sessions,
+    origin: str,
+    secure_cookies: bool,
+    limits: StreamLimits | None = None,
 ) -> FastAPI:
+    limits = limits or StreamLimits()
+    streams: dict[str, int] = {}  # open event streams per session
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     app.state.service, app.state.sessions, app.state.origin = service, sessions, origin
 
@@ -170,6 +177,31 @@ def create_app(
         if not isinstance(body, dict):
             return _error(422, "invalid_command", "the body is not an object")
         return _accepted(await service.submit(who, run_id, body))
+
+    @app.get("/api/runs/{run_id}/events")
+    async def events(
+        run_id: str,
+        s: Live,  # streaming is not use: it never refreshes the session
+        last_event_id: Annotated[str | None, Header()] = None,
+        after: str | None = None,
+    ) -> Response:
+        await service.snapshot(s.user, run_id)  # the same access check as every read
+        try:
+            cursor = parse_cursor(last_event_id, after)
+        except BadCursor:
+            return _error(422, "bad_cursor")
+        if streams.get(s.id, 0) >= limits.streams_per_session:
+            return _error(429, "too_many_streams")
+        streams[s.id] = streams.get(s.id, 0) + 1
+
+        def closed() -> None:
+            if streams.get(s.id, 0) <= 1:
+                streams.pop(s.id, None)
+            else:
+                streams[s.id] -= 1
+
+        body = event_stream(service.store, sessions, s, run_id, cursor, limits)
+        return EventStreamResponse(body, limits.send_timeout_s, closed)
 
     @app.get("/api/runs/{run_id}/commands/{command_id}")
     async def command(run_id: str, command_id: str, who: User) -> JSONResponse:
