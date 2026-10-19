@@ -88,3 +88,15 @@ def test_https_behind_a_proxy_is_allowed(tmp_path):
 def test_an_origin_is_exactly_scheme_host_port(origin):
     with pytest.raises(ConfigError):
         check_origin(origin)
+
+
+def test_the_example_config_loads(tmp_path):
+    from .conftest import REPO
+
+    env = {
+        "CAGENT_RUNNER_LAPTOP_1": "r" * 43,
+        "CAGENT_USER_ALICE": "a" * 43,
+    }
+    c = load_config(REPO / "platform" / "platform.example.yaml", env)
+    assert c.user_runners == {"alice": {"laptop-1"}} and c.models.name == "models.yaml"
+    assert c.settings.stability_window_s == 120

@@ -1,0 +1,31 @@
+# cagent-platform serve --config platform.example.yaml
+# Tokens are never written here: each *_env names the environment variable holding one.
+# Generate each with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+
+db:
+  path: data/cagent.db  # SQLite: runs, approvals, events, and LangGraph checkpoints
+
+catalog: [../catalog]  # descriptor and template roots, relative to this file
+models: models.yaml  # model tiers; leave out to run without models (spec input only)
+
+hub:  # Runners dial in here: cagent-runner serve -hub ws://HOST:8765/runner
+  host: 127.0.0.1
+  port: 8765
+  runners:
+    laptop-1: {token_env: CAGENT_RUNNER_LAPTOP_1}
+
+web:
+  host: 127.0.0.1
+  port: 8000
+  origin: http://127.0.0.1:8000  # exactly what the browser shows; https behind a TLS proxy
+  dev_http: true  # plain http is only for this machine; set secure_cookies with https
+  session_ttl_s: 43200
+  idle_ttl_s: 3600
+
+users:
+  alice: {token_env: CAGENT_USER_ALICE, runners: [laptop-1]}
+
+orchestrator:  # the design's defaults (section 5.5)
+  poll_interval_s: 3
+  stability_window_s: 120
+  startup_timeout_s: 300
