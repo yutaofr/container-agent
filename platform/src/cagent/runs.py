@@ -12,6 +12,7 @@ not atomic: when an execution ends without a result, the run goes to reconcile.
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
 import uuid
@@ -22,11 +23,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from cagent.catalog import NAME_PATTERN
-from cagent.dispatch import Execution, current
+from cagent.dispatch import MUTATING, Execution, current
 from cagent.hub import RunnerHub
 from cagent.orchestrator import EventSink, Orchestrator, Status
 from cagent.spec import ClusterSpec
 from cagent.store import ACTIVE_STATES, Store
+
+log = logging.getLogger(__name__)
 
 TERMINAL = {"healthy": "healthy", "rejected": "rejected", "escalated": "escalated"}
 
@@ -174,6 +177,47 @@ class RunService:
         self.accepting = True
         self.tasks: dict[str, asyncio.Task] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._background: set[asyncio.Task] = set()
+        self._runner_lock = asyncio.Lock()
+
+    async def close(self) -> None:
+        """Stop accepting commands, then stop the executions. Each records why it stopped;
+        one that cannot is found unfinished at the next start."""
+        self.accepting = False
+        tasks = list(self.tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*self._background, return_exceptions=True)
+
+    # --- runners ------------------------------------------------------------------------------
+
+    def runner_changed(self, runner: str, online: bool, instance: str | None) -> None:
+        """Hub listener: record the change and tell the runner's active runs."""
+        task = asyncio.get_running_loop().create_task(self._record_runner(runner, online, instance))
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def _record_runner(self, runner: str, online: bool, instance: str | None) -> None:
+        async with self._runner_lock, self.store.tx() as t:  # in the order the hub saw them
+            await t.run(
+                "INSERT INTO runner_status (runner, online, instance_id, changed_at)"
+                " VALUES (?, ?, ?, ?) ON CONFLICT (runner) DO UPDATE SET"
+                " online = excluded.online, instance_id = excluded.instance_id,"
+                " changed_at = excluded.changed_at",
+                runner,
+                int(online),
+                instance,
+                self.clock(),
+            )
+            marks = ", ".join("?" for _ in ACTIVE_STATES)
+            runs = await t.all(
+                f"SELECT id FROM runs WHERE runner = ? AND state IN ({marks})",
+                runner,
+                *ACTIVE_STATES,
+            )
+            for r in runs:
+                await t.append_event(r["id"], "runner", {"online": online, "instance_id": instance})
 
     # --- access ------------------------------------------------------------------------------
 
@@ -576,8 +620,84 @@ class RunService:
         async def sink(event: dict[str, Any]) -> None:
             await self._record_event(run_id, execution_id, event)
 
-        status = await work(sink)
+        try:
+            status = await work(sink)
+        except asyncio.CancelledError:
+            await self._interrupted(
+                run_id, execution_id, command, "cancelled: the platform stopped"
+            )
+            raise
+        except Exception as e:  # the Runner went away, a call timed out, an event failed to commit
+            log.warning("execution %s of run %s failed: %r", execution_id, run_id, e)
+            await self._interrupted(run_id, execution_id, command, f"{type(e).__name__}: {e}")
+            return
         await self._finished(run_id, execution_id, command, status)
+
+    async def _interrupted(
+        self, run_id: str, execution_id: str, command: tuple[str, str], reason: str
+    ) -> None:
+        """Tx2': the execution ended without a result. What it did is unknown: the run goes
+        to reconcile, and the cluster is marked if a mutating call has no recorded result."""
+        async with self.store.tx() as t:
+            run = await t.get_run(run_id)
+            if run is None or run["execution_id"] != execution_id or run["state"] != "running":
+                return
+            now = self.clock()
+            await self._mark_unconfirmed(t, run, execution_id, now)
+            revision = await t.bump_revision(run_id)
+            await t.update(
+                "commands",
+                {"user": command[0], "command_id": command[1]},
+                status="interrupted",
+                effect="unknown",
+                reason=reason,
+            )
+            await t.update_run(
+                run_id,
+                state="reconcile",
+                pending=None,
+                reconcile={
+                    "reason": reason,
+                    "last_phase": run["phase"],
+                    "since": now,
+                    "execution_id": execution_id,
+                },
+            )
+            await t.append_event(
+                run_id,
+                "run_state",
+                {"state": "reconcile", "revision": revision, "pending_id": None},
+                execution_id,
+            )
+
+    async def _mark_unconfirmed(
+        self, t, run: dict[str, Any], execution_id: str | None, now: float
+    ) -> None:
+        """Mark the run's cluster for each mutating call execution_id sent without a result."""
+        if execution_id is None:
+            return
+        marks = ", ".join("?" for _ in MUTATING)
+        sent = await t.all(
+            "SELECT method FROM dispatches WHERE execution_id = ? AND result_at IS NULL"
+            f" AND method IN ({marks}) ORDER BY call_id",
+            execution_id,
+            *sorted(MUTATING),
+        )
+        if not sent:
+            return
+        cluster = await t.get_cluster(run["runner"], run["cluster"])
+        mark = {
+            "id": self.new_id(),
+            "reason": ", ".join(d["method"] for d in sent) + " sent without a recorded result",
+            "run_id": run["id"],
+            "execution_id": execution_id,
+            "at": now,
+        }
+        await t.update(
+            "clusters",
+            {"runner": run["runner"], "name": run["cluster"]},
+            marks=[*cluster["marks"], mark],
+        )
 
     async def _record_event(self, run_id: str, execution_id: str, event: dict[str, Any]) -> None:
         """Commit one application event with the projections it changes."""
