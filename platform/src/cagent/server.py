@@ -51,7 +51,7 @@ class Platform:
             RecordingCaller(self.hub, self.store),
             load_catalog(*c.catalog),
             saver,
-            self.settings,
+            self.settings or c.settings,
             router=router,
         )
         self.service = RunService(self.store, orch, self.hub, c.user_runners)

@@ -31,6 +31,7 @@ def test_a_local_development_config_loads(tmp_path):
     assert c.user_runners == {"alice": {"laptop-1"}, "bob": set()}
     assert c.db_path == tmp_path / "data/cagent.db" and c.catalog == [tmp_path / "../catalog"]
     assert (c.web_host, c.web_port, c.secure_cookies) == ("127.0.0.1", 8000, False)
+    assert (c.settings.stability_window_s, c.settings.poll_interval_s) == (120, 3)
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,8 @@ from urllib.parse import urlsplit
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from cagent.orchestrator import Settings
+
 MIN_TOKEN = 32  # characters; tokens are random strings, not passwords
 
 
@@ -55,6 +57,14 @@ class _Db(_Strict):
     path: str
 
 
+class _Orchestrator(_Strict):
+    """Timings; the defaults follow the design's section 5.5."""
+
+    poll_interval_s: float = Field(default=3, ge=0)
+    stability_window_s: float = Field(default=120, ge=0)
+    startup_timeout_s: float = Field(default=300, gt=0)
+
+
 class _File(_Strict):
     db: _Db
     catalog: list[str]
@@ -62,6 +72,7 @@ class _File(_Strict):
     hub: _Hub
     web: _Web
     users: dict[str, _User]
+    orchestrator: _Orchestrator = _Orchestrator()
 
 
 @dataclass(frozen=True)
@@ -80,6 +91,7 @@ class PlatformConfig:
     idle_ttl_s: float
     user_tokens: dict[str, str]  # user -> token
     user_runners: dict[str, set[str]]
+    settings: Settings
 
 
 def _loopback(host: str) -> bool:
@@ -162,4 +174,5 @@ def load_config(path: str | Path, environ: Mapping[str, str] = os.environ) -> Pl
         idle_ttl_s=web.idle_ttl_s,
         user_tokens=user_tokens,
         user_runners={u: set(c.runners) for u, c in raw.users.items()},
+        settings=Settings(**raw.orchestrator.model_dump()),
     )

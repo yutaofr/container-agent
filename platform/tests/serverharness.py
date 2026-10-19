@@ -20,7 +20,7 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def write_config(tmp: Path, web_port: int, hub_port: int = 0) -> Path:
+def write_config(tmp: Path, web_port: int, hub_port: int = 0, fast: bool = False) -> Path:
     doc = {
         "db": {"path": "data/cagent.db"},
         "catalog": [str(REPO_CATALOG), str(FIXTURE_CATALOG)],
@@ -31,6 +31,8 @@ def write_config(tmp: Path, web_port: int, hub_port: int = 0) -> Path:
             "bob": {"token_env": "CAGENT_BOB", "runners": ["laptop-1"]},
         },
     }
+    if fast:
+        doc["orchestrator"] = {"poll_interval_s": 0.05, "stability_window_s": 0.1}
     path = tmp / "platform.yaml"
     path.write_text(yaml.safe_dump(doc))
     return path
