@@ -190,6 +190,85 @@ class RunService:
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.gather(*self._background, return_exceptions=True)
 
+    async def recover_on_startup(self) -> None:
+        """Before accepting requests: mark every Runner offline, and send each run that cannot
+        show where it stands to reconcile. Nothing here advances a graph or calls a Runner.
+
+        A run keeps waiting only if no advancing command is open and its pending item is
+        intact: a graph interrupt still in the checkpoint, or a recovery plan still valid."""
+        now = self.clock()
+        marks = ", ".join("?" for _ in ACTIVE_STATES)
+        async with self.store.read() as t:
+            runs = await t.all(f"SELECT * FROM runs WHERE state IN ({marks})", *ACTIVE_STATES)
+        interrupts = {}
+        for run in runs:
+            if run["state"] == "waiting" and run["pending"]["kind"] != "recovery":
+                interrupts[run["id"]] = (await self.orch.status(run["thread_id"])).interrupt_id
+        async with self.store.tx() as t:
+            await t.run(
+                "UPDATE runner_status SET online = 0, instance_id = NULL, changed_at = ?", now
+            )
+            # A read-only check that never finished changed nothing.
+            await t.run(
+                "UPDATE commands SET status = 'interrupted', reason = 'platform restarted'"
+                " WHERE status = 'accepted' AND class = 'read_only'"
+            )
+            for old in runs:
+                run = await t.get_run(old["id"])
+                open_ = await t.all(
+                    "SELECT * FROM commands WHERE run_id = ? AND status = 'accepted'"
+                    " AND class = 'advancing'",
+                    run["id"],
+                )
+                if not open_ and await self._intact(t, run, interrupts.get(run["id"])):
+                    continue
+                reason = (
+                    "platform restarted"
+                    if open_ or run["state"] == "running"
+                    else ("pending item no longer matches the checkpoint")
+                )
+                await self._mark_unconfirmed(t, run, run["execution_id"], now)
+                for c in open_:
+                    await t.update(
+                        "commands",
+                        {"user": c["user"], "command_id": c["command_id"]},
+                        status="interrupted",
+                        effect="unknown",
+                        reason=reason,
+                    )
+                revision = await t.bump_revision(run["id"])
+                await t.update_run(
+                    run["id"],
+                    state="reconcile",
+                    pending=None,
+                    reconcile={
+                        "reason": reason,
+                        "last_phase": run["phase"],
+                        "since": now,
+                        "execution_id": run["execution_id"],
+                    },
+                )
+                await t.append_event(
+                    run["id"],
+                    "run_state",
+                    {"state": "reconcile", "revision": revision, "pending_id": None},
+                )
+
+    @staticmethod
+    async def _intact(t, run: dict[str, Any], interrupt_id: str | None) -> bool:
+        if run["state"] == "reconcile":
+            return True
+        if run["state"] != "waiting":
+            return False
+        pending = run["pending"]
+        if pending["kind"] == "recovery":
+            plan = await t.one(
+                "SELECT id FROM plans WHERE id = ? AND invalidated_at IS NULL",
+                pending["payload"]["plan_id"],
+            )
+            return plan is not None
+        return interrupt_id is not None and interrupt_id == pending["interrupt_id"]
+
     # --- runners ------------------------------------------------------------------------------
 
     def runner_changed(self, runner: str, online: bool, instance: str | None) -> None:
