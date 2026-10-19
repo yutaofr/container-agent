@@ -36,6 +36,7 @@ var ErrUnauthorized = errors.New("hub rejected the runner token")
 const (
 	rpcMethodNotFound = -32601
 	rpcInvalidParams  = -32602
+	rpcBusy           = -32000 // the call queue is full
 )
 
 type rpcRequest struct {
@@ -74,6 +75,7 @@ type serveConfig struct {
 	backoff      time.Duration
 	backoffMax   time.Duration
 	pingEvery    time.Duration
+	queueSize    int // calls waiting across all clusters; 0 means 64
 }
 
 // stringList is a repeatable string flag.
@@ -132,9 +134,11 @@ func runServe(args []string, stdout, stderr io.Writer, d deps) int {
 // serveLoop keeps a hub connection up until ctx ends, reconnecting with exponential
 // backoff. Only a rejected token stops it early.
 func serveLoop(ctx context.Context, cfg serveConfig, d deps, logw io.Writer) error {
+	ex := newExecutor(cfg, d)
+	go ex.run(ctx)
 	wait := cfg.backoff
 	for {
-		connected, err := serveOnce(ctx, cfg, d)
+		connected, err := serveOnce(ctx, cfg, ex)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -154,9 +158,9 @@ func serveLoop(ctx context.Context, cfg serveConfig, d deps, logw io.Writer) err
 	}
 }
 
-// serveOnce runs one connection. The read loop never blocks on a tool: calls go to a
-// single worker, so pings keep getting answered during a long build.
-func serveOnce(ctx context.Context, cfg serveConfig, d deps) (bool, error) {
+// serveOnce runs one connection. The read loop never blocks on a tool: calls go to the
+// process's single worker, so pings and status keep getting answered during a long build.
+func serveOnce(ctx context.Context, cfg serveConfig, ex *executor) (bool, error) {
 	c, resp, err := websocket.Dial(ctx, cfg.hub, &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + cfg.token}},
 	})
@@ -171,19 +175,11 @@ func serveOnce(ctx context.Context, cfg serveConfig, d deps) (bool, error) {
 
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	if err := wsjson.Write(connCtx, c, hello()); err != nil {
+	if err := wsjson.Write(connCtx, c, hello(ex.instance)); err != nil {
 		return true, err
 	}
-
-	calls := make(chan rpcRequest, 64)
-	defer close(calls)
-	go func() {
-		for req := range calls {
-			if err := wsjson.Write(connCtx, c, dispatch(connCtx, cfg, d, req)); err != nil {
-				cancel()
-			}
-		}
-	}()
+	gen := ex.connect()
+	defer ex.disconnect(gen) // runs first: this connection's queued calls must not start
 	go func() {
 		t := time.NewTicker(cfg.pingEvery)
 		defer t.Stop()
@@ -209,17 +205,44 @@ func serveOnce(ctx context.Context, cfg serveConfig, d deps) (bool, error) {
 		if len(req.ID) == 0 {
 			continue // notifications need no answer
 		}
-		calls <- req
+		if req.Method == "status" {
+			if err := wsjson.Write(connCtx, c, statusResponse(ex, req)); err != nil {
+				return true, err
+			}
+			continue
+		}
+		j := job{gen: gen, conn: c, ctx: connCtx, req: req, cluster: clusterOf(req.Params)}
+		if !ex.enqueue(j) {
+			busy := rpcResponse{JSONRPC: "2.0", ID: req.ID,
+				Error: &rpcError{Code: rpcBusy, Message: "runner busy: call queue is full"}}
+			if err := wsjson.Write(connCtx, c, busy); err != nil {
+				return true, err
+			}
+		}
 	}
 }
 
-func hello() map[string]any {
-	names := make([]string, 0, len(tools))
+// statusResponse answers status from the read loop, never the queue, so it works while a
+// long call runs or the queue is full.
+func statusResponse(ex *executor, req rpcRequest) rpcResponse {
+	resp := rpcResponse{JSONRPC: "2.0", ID: req.ID}
+	if err := decode(req.Params, &struct{}{}); err != nil {
+		resp.Error = &rpcError{Code: rpcInvalidParams, Message: err.Error()}
+		return resp
+	}
+	out, _ := json.Marshal(ex.status())
+	resp.Result = &ToolResult{ExitCode: exitOK, Output: out}
+	return resp
+}
+
+func hello(instance string) map[string]any {
+	names := []string{"status"}
 	for n := range tools {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	return map[string]any{"jsonrpc": "2.0", "method": "hello", "params": map[string]any{"tools": names}}
+	return map[string]any{"jsonrpc": "2.0", "method": "hello",
+		"params": map[string]any{"tools": names, "instance_id": instance}}
 }
 
 // dispatch runs one call. Params errors become JSON-RPC errors; everything the subcommand
