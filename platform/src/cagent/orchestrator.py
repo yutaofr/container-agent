@@ -15,9 +15,14 @@
 
 Only `ask`, `save`, `approve`, `approve_patch`, and `escalate` wait for a person, via
 LangGraph interrupts;
-they do nothing before interrupting, because a node that called interrupt() runs again from
-the top when resumed. All cluster work goes through the Runner's tools, so the orchestrator
-never touches Docker.
+they have no side effects before interrupting, because a node that called interrupt() runs
+again from the top when resumed. All cluster work goes through the Runner's tools, so the
+orchestrator never touches Docker.
+
+Runs report progress as application events (phase_started, phase_completed,
+phase_interrupted, phase_failed, observation, observation_failed) through an optional
+callback. They are built from LangGraph's task and custom streams with whitelisted fields:
+raw task events carry node inputs and results, which may hold the whole state.
 """
 
 import asyncio
@@ -30,6 +35,7 @@ from typing import Any, Protocol, TypedDict
 import yaml
 from jsonpatch import JsonPatchException
 from jsonpointer import JsonPointerException
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
@@ -111,6 +117,53 @@ class Status:
     waiting: dict[str, Any] | None  # the approval or escalation a person must answer
     compose: dict[str, Any] | None
     fixes: list[dict[str, Any]]
+    interrupt_id: str | None = None  # LangGraph's id for the interrupt behind waiting
+
+
+# Receives each application event: {"type", "task_id", "payload"}.
+EventSink = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def _service_summary(s: dict[str, Any]) -> dict[str, Any]:
+    """What an observation shows of one service, from the Runner's redacted snapshot."""
+    return {
+        "service": s.get("service"),
+        "role": s.get("role"),
+        "state": s.get("state"),
+        "health": s.get("health"),
+        "restart_count": s.get("restart_count", 0),
+        "exit_code": s.get("exit_code"),
+        "errors": list(s.get("error_lines") or []),
+        "tail": list(s.get("tail") or []),
+    }
+
+
+def _app_events(part: dict[str, Any], started: dict[str, str]) -> list[dict[str, Any]]:
+    """Map one stream part to application events. started tracks running tasks by id."""
+    data = part["data"]
+    if part["type"] == "custom":
+        if isinstance(data, dict) and data.get("type") == "observation":
+            payload = {"received_at": data["received_at"], "services": data["services"]}
+            return [{"type": "observation", "task_id": None, "payload": payload}]
+        if isinstance(data, dict) and data.get("type") == "observation_failed":
+            payload = {"received_at": data["received_at"], "reason": data["reason"]}
+            return [{"type": "observation_failed", "task_id": None, "payload": payload}]
+        return []
+    task_id, phase = data["id"], data["name"]
+    if phase.startswith("__"):
+        return []
+    if "triggers" in data:  # a task starting; a resumed node starts again with the same id
+        started[task_id] = phase
+        return [{"type": "phase_started", "task_id": task_id, "payload": {"phase": phase}}]
+    started.pop(task_id, None)
+    if data.get("interrupts"):
+        kind = (data["interrupts"][0].get("value") or {}).get("kind")
+        payload = {"phase": phase, "pending_kind": kind}
+        return [{"type": "phase_interrupted", "task_id": task_id, "payload": payload}]
+    if data.get("error") is not None:
+        payload = {"phase": phase, "reason": type(data["error"]).__name__}
+        return [{"type": "phase_failed", "task_id": task_id, "payload": payload}]
+    return [{"type": "phase_completed", "task_id": task_id, "payload": {"phase": phase}}]
 
 
 _BIND = re.compile(r"Bind for [0-9.:\[\]]*?:(\d+) failed|0\.0\.0\.0:(\d+).*address already in use")
@@ -149,20 +202,49 @@ class Orchestrator:
 
     # --- public API -------------------------------------------------------------------------
 
-    async def start(self, thread_id: str, spec: ClusterSpec, runner: str) -> Status:
-        await self.graph.ainvoke(self._initial(runner, spec=spec), self._config(thread_id))
+    async def start(
+        self, thread_id: str, spec: ClusterSpec, runner: str, on_event: EventSink | None = None
+    ) -> Status:
+        await self._drive(thread_id, self._initial(runner, spec=spec), on_event)
         return await self.status(thread_id)
 
     async def start_from_purpose(
-        self, thread_id: str, purpose: str, runner: str, cluster: str | None = None
+        self,
+        thread_id: str,
+        purpose: str,
+        runner: str,
+        cluster: str | None = None,
+        on_event: EventSink | None = None,
     ) -> Status:
         """Start from a sentence: a model drafts the spec, then questions close its gaps.
         With cluster, the spec takes that name instead of the one the model picks."""
         if self.router is None:
             raise ValueError("starting from a purpose needs a model router")
         initial = self._initial(runner, purpose=purpose, cluster=cluster)
-        await self.graph.ainvoke(initial, self._config(thread_id))
+        await self._drive(thread_id, initial, on_event)
         return await self.status(thread_id)
+
+    async def _drive(self, thread_id: str, payload: Any, on_event: EventSink | None) -> None:
+        """Run the graph until it waits or ends, consuming the whole stream with or without a
+        sink. An exception from a node ends the stream without a task result, so the tasks
+        still running are reported failed here before the exception propagates."""
+        started: dict[str, str] = {}
+        try:
+            async for part in self.graph.astream(
+                payload,
+                self._config(thread_id),
+                stream_mode=["tasks", "custom"],
+                version="v2",
+            ):
+                for event in _app_events(part, started):
+                    if on_event is not None:
+                        await on_event(event)
+        except Exception as e:
+            if on_event is not None:
+                for task_id, phase in started.items():
+                    payload = {"phase": phase, "reason": type(e).__name__}
+                    await on_event({"type": "phase_failed", "task_id": task_id, "payload": payload})
+            raise
 
     def _initial(
         self,
@@ -201,19 +283,25 @@ class Orchestrator:
             "deadline": self.clock() + self.settings.deadline_s,
         }
 
-    async def resume(self, thread_id: str, decision: dict[str, Any]) -> Status:
+    async def resume(
+        self, thread_id: str, decision: dict[str, Any], on_event: EventSink | None = None
+    ) -> Status:
         """Answer what is pending: a question ({"answer": value | None}), a save
         ({"saved": True}), an approval ({"approve": bool, "allow": [...]}), or an escalation
         ({"action": "retry"}). {"action": "abort"} ends a question, save, or escalation."""
-        await self.graph.ainvoke(Command(resume=decision), self._config(thread_id))
+        await self._drive(thread_id, Command(resume=decision), on_event)
         return await self.status(thread_id)
 
     async def status(self, thread_id: str) -> Status:
         snap = await self.graph.aget_state(self._config(thread_id))
         values = snap.values
-        waiting = snap.interrupts[0].value if snap.interrupts else None
+        first = snap.interrupts[0] if snap.interrupts else None
         return Status(
-            values.get("outcome"), waiting, values.get("compose"), values.get("fixes", [])
+            values.get("outcome"),
+            first.value if first else None,
+            values.get("compose"),
+            values.get("fixes", []),
+            first.id if first else None,
         )
 
     @staticmethod
@@ -542,7 +630,19 @@ class Orchestrator:
         return probes
 
     async def _snapshot(self, state: State) -> dict[str, Any]:
-        return (await self._call(state, "snapshot")).output or {"services": []}
+        """Take a snapshot and report it as an observation, stamped when it arrived. A failed
+        or malformed snapshot is reported as observation_failed, never as an empty cluster."""
+        res = await self._call(state, "snapshot")
+        received_at = self.clock()
+        write = get_stream_writer()
+        out = res.output
+        if res.ok and isinstance(out, dict) and isinstance(out.get("services"), list):
+            services = [_service_summary(s) for s in out["services"]]
+            write({"type": "observation", "received_at": received_at, "services": services})
+            return out
+        reason = f"snapshot exited {res.exit_code}: {(res.stderr or 'no output')[-300:]}"
+        write({"type": "observation_failed", "received_at": received_at, "reason": reason})
+        return out if isinstance(out, dict) else {"services": []}
 
     async def _step_watch(self, state: State) -> Command:
         """Poll until every service runs and is healthy, then verify; diagnose on failure."""
