@@ -107,6 +107,8 @@ class State(TypedDict, total=False):
     escalation: dict[str, Any] | None
     deadline: float
     outcome: str | None
+    recovered: bool  # a recovery thread: START goes straight to validate
+    source: dict[str, Any] | None  # the interrupted thread and checkpoint a recovery came from
 
 
 @dataclass(frozen=True)
@@ -224,6 +226,19 @@ class Orchestrator:
         await self._drive(thread_id, initial, on_event)
         return await self.status(thread_id)
 
+    async def start_recovery(
+        self, thread_id: str, initial: dict[str, Any], on_event: EventSink | None = None
+    ) -> Status:
+        """Run an approved recovery on a new thread, from validate (cagent.recovery builds
+        initial)."""
+        await self._drive(thread_id, initial, on_event)
+        return await self.status(thread_id)
+
+    async def checkpoint(self, thread_id: str) -> tuple[dict[str, Any], str | None]:
+        """The thread's last checkpointed values and that checkpoint's id."""
+        snap = await self.graph.aget_state(self._config(thread_id))
+        return dict(snap.values), (snap.config or {}).get("configurable", {}).get("checkpoint_id")
+
     async def _drive(self, thread_id: str, payload: Any, on_event: EventSink | None) -> None:
         """Run the graph until it waits or ends, consuming the whole stream with or without a
         sink. An exception from a node ends the stream without a task result, so the tasks
@@ -332,7 +347,9 @@ class Orchestrator:
         ):
             g.add_node(name, getattr(self, f"_step_{name}"))
         g.add_conditional_edges(
-            START, lambda s: "generate" if s["spec"] else "extract", ["generate", "extract"]
+            START,
+            lambda s: "validate" if s.get("recovered") else "generate" if s["spec"] else "extract",
+            ["validate", "generate", "extract"],
         )
         g.add_edge("done", END)
         return g
