@@ -1,0 +1,5 @@
+<span class="command" data-command-id="{{ c.command_id }}" data-status="{{ c.status }}">
+  {%- if c.status == "accepted" %}Accepted; the result is not known yet.
+  {%- elif c.status == "done" %}Carried out.
+  {%- elif c.status == "interrupted" %}Interrupted; its effect is unknown{% if c.reason %} ({{ c.reason }}){% endif %}.
+  {%- else %}{{ c.status }}{% endif %}</span>

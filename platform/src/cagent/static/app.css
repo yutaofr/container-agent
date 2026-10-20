@@ -32,3 +32,9 @@ table.services td, table.services th { text-align: left; padding: .25rem .5rem; 
 pre.diff span { display: block; } .d-add { color: var(--ok); } .d-del { color: var(--bad); } .d-hunk, .d-file { color: var(--muted); }
 table.preview { border-collapse: collapse; } table.preview td, table.preview th { padding: .25rem .5rem; border-bottom: 1px solid var(--line); text-align: left; }
 .card.stale, .card[data-stale] { opacity: .6; }
+ol.record { list-style: none; padding: 0; }
+ol.record li { padding: .3rem 0; border-bottom: 1px solid var(--line); }
+ol.record .when { color: var(--muted); font-size: .85em; margin-right: .4rem; }
+#record:has(#show-events:not(:checked)) li.event { display: none; }
+.gap { color: var(--warn); }
+.command { margin-left: .4rem; font-size: .9em; color: var(--muted); }

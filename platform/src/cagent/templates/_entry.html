@@ -1,0 +1,54 @@
+{% if e.source == "pending" and e.type == "published" %}
+<li class="entry asked" data-seq="{{ e.seq }}">
+  <span class="when">{{ e.at | when }}</span>
+  The agent asked for {{ kind_titles.get(e.kind, e.kind) }}.
+  {% if e.get("truncated") %}<span class="note">(too large to show here)</span>
+  {% elif e.kind == "question" %}<q>{{ e.payload.question }}</q>
+  {% elif e.kind == "escalation" %}<code>{{ e.payload.reason }}</code>
+  {% elif e.kind == "patch_approval" %}<span class="untrusted">{{ e.payload.root_cause }}</span>
+  {% elif e.kind == "recovery" %}Mode: {{ e.payload.mode }}
+  {% elif e.kind == "approval" %}<details><summary>Compose file</summary><pre>{{ e.payload.compose }}</pre></details>
+  {% elif e.kind == "save_descriptors" %}Files: {{ e.payload.files | list | join(", ") }}
+  {% endif %}
+</li>
+{% elif e.source == "pending" %}
+{% set d = e.decision %}
+<li class="entry decided" data-seq="{{ e.seq }}">
+  <span class="when">{{ e.at | when }}</span>
+  {{ e.user }}
+  {% if e.get("truncated") %}decided <span class="note">(too large to show here)</span>
+  {% elif d.get("action") == "abort" %}aborted.
+  {% elif d.get("action") == "default" %}took the default.
+  {% elif d.get("action") == "answer" %}answered {% if d.answer is mapping %}(hidden){% else %}<q>{{ d.answer }}</q>{% endif %}.
+  {% elif d.get("action") == "saved" %}said the file was saved.
+  {% elif d.get("action") == "retry" %}asked to retry.
+  {% elif "approve" in d %}{{ "approved" if d.approve else ("declined" if e.kind == "recovery" else "rejected") }}
+    {%- if d.get("allow") %}, allowing {{ d.allow | join(", ") }}{% endif %}
+    {%- if d.get("acknowledged") %}, accepting {{ d.acknowledged | join(", ") }}{% endif %}.
+  {% endif %}
+  {% if not e.published %}<span class="note">The content of this item was not kept.</span>{% endif %}
+  {% if e.command %}{% set c = e.command %}{% include "command.html" %}{% endif %}
+</li>
+{% elif e.type == "run_state" %}
+<li class="entry state" data-seq="{{ e.seq }}">
+  <span class="when">{{ e.at | when }}</span> The run is <b>{{ e.payload.state }}</b>.
+  {% if e.get("pending_kept") == false %}<span class="note">The content of the item it waits for was not kept.</span>{% endif %}
+</li>
+{% elif e.type == "observation" %}
+<li class="entry event" data-seq="{{ e.seq }}">
+  <span class="when">{{ e.at | when }}</span> Observed {% if e.get("truncated") %}some{% else %}{{ e.payload.services | length }}{% endif %} services.
+</li>
+{% elif e.type == "observation_failed" %}
+<li class="entry event" data-seq="{{ e.seq }}">
+  <span class="when">{{ e.at | when }}</span> Collection failed: {{ e.payload.reason }}
+</li>
+{% elif e.type == "runner" %}
+<li class="entry event" data-seq="{{ e.seq }}">
+  <span class="when">{{ e.at | when }}</span> Runner {{ "connected" if e.payload.online else "disconnected" }}.
+</li>
+{% else %}
+<li class="entry event" data-seq="{{ e.seq }}">
+  <span class="when">{{ e.at | when }}</span> {{ e.type | replace("phase_", "") }}: <code>{{ e.payload.phase }}</code>
+  {%- if e.payload.get("reason") %} ({{ e.payload.reason }}){% endif %}
+</li>
+{% endif %}

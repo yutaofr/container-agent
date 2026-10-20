@@ -161,6 +161,16 @@ def json_value(v: Any) -> str:
 
 templates.filters["json_value"] = json_value
 
+KIND_TITLES = {
+    "question": "a question",
+    "save_descriptors": "a descriptor to save",
+    "approval": "the compose file to approve",
+    "patch_approval": "a model's patch to approve",
+    "escalation": "an escalation",
+    "recovery": "a recovery plan",
+}
+templates.globals["kind_titles"] = KIND_TITLES
+
 CHOICES = {
     "question": {"answer", "default", "abort"},
     "save_descriptors": {"saved", "abort"},
@@ -352,6 +362,22 @@ def install(app: FastAPI, service: RunService, access: Access) -> None:
         response.headers["Cagent-Event-Seq"] = str(run["event_seq"])
         response.headers["Cagent-Revision"] = str(run["revision"])
         return response
+
+    @app.get("/runs/{run_id}/fragments/record")
+    async def record_fragment(request: Request, run_id: str, after: int = 0) -> Response:
+        """The next record entries after a cursor, with the cursor they reach."""
+        s = access.require(request)
+        rec = await service.record(s.user, run_id, after)
+        response = render("record.html", rec=rec, after=after)
+        response.headers["Cagent-Record-After"] = str(rec["after"])
+        response.headers["Cagent-Record-More"] = "true" if rec["more"] else "false"
+        return response
+
+    @app.get("/runs/{run_id}/fragments/command/{command_id}")
+    async def command_fragment(request: Request, run_id: str, command_id: str) -> Response:
+        """One command's current result, for a decision the page still shows as open."""
+        s = access.require(request)
+        return render("command.html", c=await service.command(s.user, run_id, command_id))
 
     @app.post("/runs/{run_id}/commands")
     async def command(request: Request, run_id: str) -> Response:
