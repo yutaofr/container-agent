@@ -259,7 +259,9 @@ class SecurityHeaders:
                 headers += [
                     (b"content-security-policy", CSP.encode()),
                     (b"x-content-type-options", b"nosniff"),
-                    (b"referrer-policy", b"no-referrer"),
+                    # same-origin, not no-referrer: under no-referrer the browser sends
+                    # "Origin: null" on its own POSTs, and the exact Origin check refuses them.
+                    (b"referrer-policy", b"same-origin"),
                 ]
                 if not static:
                     headers.append((b"cache-control", b"no-store"))

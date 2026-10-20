@@ -53,3 +53,21 @@ async def running(tmp_path):
 def fail_on_purpose() -> bool:
     """Set CAGENT_BROWSER_FAIL=1 to check that a failing test leaves a trace and screenshot."""
     return os.environ.get("CAGENT_BROWSER_FAIL") == "1"
+
+
+class Console:
+    """Collects console errors and page errors (CSP violations show up here too)."""
+
+    def __init__(self, page):
+        self.errors: list[str] = []
+        page.on("console", lambda m: self.errors.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: self.errors.append(str(e)))
+
+
+async def log_in(page, base: str, user: str = "alice") -> Console:
+    console = Console(page)
+    await page.goto(f"{base}/login")
+    await page.fill('input[name="token"]', ENV[f"CAGENT_{user.upper()}"])
+    await page.click('button[type="submit"]')
+    await page.wait_for_url(f"{base}/")
+    return console

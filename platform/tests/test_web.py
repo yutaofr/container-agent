@@ -37,7 +37,7 @@ async def test_the_login_page_sets_a_pre_session_and_strict_headers(web):
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
         assert r.headers["content-security-policy"] == CSP
         assert r.headers["x-content-type-options"] == "nosniff"
-        assert r.headers["referrer-policy"] == "no-referrer"
+        assert r.headers["referrer-policy"] == "same-origin"
         assert r.headers["cache-control"] == "no-store"
         cookie = r.headers["set-cookie"].lower()
         assert "cagent_pre=" in cookie and "httponly" in cookie and "samesite=strict" in cookie

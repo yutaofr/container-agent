@@ -11,7 +11,7 @@
       {% endfor %}
     </select>
   </label>
-  <label>Cluster name <input name="cluster" required pattern="[a-z0-9][a-z0-9_-]*"></label>
+  <label>Cluster name <input name="cluster" required pattern="[a-z0-9][a-z0-9_\-]*"></label>
   <fieldset>
     <legend>What to build</legend>
     <label><input type="radio" name="input" value="purpose" checked> A purpose, in a sentence</label>

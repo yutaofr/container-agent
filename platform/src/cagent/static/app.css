@@ -38,3 +38,4 @@ ol.record .when { color: var(--muted); font-size: .85em; margin-right: .4rem; }
 #record:has(#show-events:not(:checked)) li.event { display: none; }
 .gap { color: var(--warn); }
 .command { margin-left: .4rem; font-size: .9em; color: var(--muted); }
+.banner { background: #fff4e5; border-bottom: 1px solid var(--warn); padding: .6rem 1.2rem; }

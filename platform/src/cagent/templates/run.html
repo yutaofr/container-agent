@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ run.cluster }} · cagent{% endblock %}
+{% block scripts %}<script src="/static/run.js" defer></script>{% endblock %}
 {% block main %}
 <div id="run" data-run-id="{{ run.id }}" data-event-seq="{{ run.event_seq }}" data-record-after="0">
   <h1>{{ run.cluster }} <small>on {{ run.runner }}</small></h1>
