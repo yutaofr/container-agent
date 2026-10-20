@@ -1,0 +1,46 @@
+{% if card %}
+<article class="card" id="card-{{ card.pending_id }}" data-kind="{{ card.kind }}"
+  data-pending-id="{{ card.pending_id }}" data-revision="{{ card.revision }}">
+  <form hx-post="/runs/{{ run.id }}/commands" hx-target="closest article" hx-swap="outerHTML"
+    hx-disabled-elt="find button">
+    <input type="hidden" name="command_id" value="{{ card.command_id }}">
+    <input type="hidden" name="action" value="answer">
+    <input type="hidden" name="kind" value="{{ card.kind }}">
+    <input type="hidden" name="pending_id" value="{{ card.pending_id }}">
+    <input type="hidden" name="expected_revision" value="{{ card.revision }}">
+    <input type="hidden" name="target" value="{{ card.pending_id }}">
+    {% include card.template %}
+    <div class="card-error" id="error-{{ card.pending_id }}" aria-live="polite"></div>
+  </form>
+</article>
+{% elif run.state == "reconcile" %}
+<article class="card panel" data-kind="reconcile">
+  <h2>Reconcile this run</h2>
+  <p>The platform cannot tell what the last execution did. Check the Runner, then review a recovery plan, or abandon the run.</p>
+  {% if run.last_check %}
+  <p class="note">Last check at {{ run.last_check.at | when }}: the Runner was
+    {{ "idle" if run.last_check.idle else "busy with this cluster" }}
+    {%- if run.last_check.same_instance == false %}, and it is another Runner process than before{% endif %}.</p>
+  {% else %}
+  <p class="note">Not checked yet.</p>
+  {% endif %}
+  <div class="actions">
+    {% for action, label, extra in [
+      ("refresh", "Refresh check", ""),
+      ("review_recovery", "Review recovery plan", ""),
+      ("abandon", "Abandon run", "confirm"),
+    ] %}
+    <form hx-post="/runs/{{ run.id }}/commands" hx-target="closest article" hx-swap="outerHTML"
+      hx-disabled-elt="find button"
+      {%- if extra == "confirm" %} hx-confirm="Abandon this run? Containers and volumes stay as they are."{% endif %}>
+      <input type="hidden" name="command_id" value="{{ panel_command_id }}-{{ action }}">
+      <input type="hidden" name="action" value="{{ action }}">
+      <input type="hidden" name="expected_revision" value="{{ run.revision }}">
+      <button type="submit"
+        {%- if action == "review_recovery" and not (run.last_check and run.last_check.idle) %} disabled{% endif %}>{{ label }}</button>
+    </form>
+    {% endfor %}
+  </div>
+  <div class="card-error" id="error-panel" aria-live="polite"></div>
+</article>
+{% endif %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Runs · cagent{% endblock %}
+{% block main %}
+<h1>Runs</h1>
+<p><a class="button" href="/runs/new">New run</a></p>
+{% if runs %}
+<table class="runs">
+  <thead><tr><th>Cluster</th><th>Runner</th><th>State</th><th>Created</th></tr></thead>
+  <tbody>
+  {% for run in runs %}
+    <tr>
+      <td><a href="/runs/{{ run.id }}">{{ run.cluster }}</a></td>
+      <td>{{ run.runner }}</td>
+      <td><span class="state state-{{ run.state }}">{{ run.state }}</span></td>
+      <td>{{ run.created_at | when }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No runs yet.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,8 @@
+<template data-record-after="{{ rec.after }}" data-more="{{ 'true' if rec.more else 'false' }}">
+{% if rec.gap and after == 0 %}
+<li class="gap">Some earlier events were trimmed; pending items and decisions are all here.</li>
+{% endif %}
+{% for e in rec.entries %}
+{% include "_entry.html" %}
+{% endfor %}
+</template>

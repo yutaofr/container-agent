@@ -1,0 +1,18 @@
+{% set p = card.payload %}
+<h2>Save a service descriptor</h2>
+{% if p.error %}<p class="error">The saved file did not read back: {{ p.error }}</p>{% endif %}
+<p>Save each file on the machine of Runner <b>{{ run.runner }}</b>, in the project at
+  <code>{{ p.workdir }}</code>. Downloading a file to this computer does not save it in the project.</p>
+{% for path, text in p.files | dictsort %}
+<figure>
+  <figcaption><code>{{ p.workdir }}/{{ path }}</code>
+    <a href="/runs/{{ run.id }}/pendings/{{ card.pending_id }}/files/{{ loop.index0 }}">Download</a></figcaption>
+  <pre>{{ text }}</pre>
+</figure>
+{% endfor %}
+{% if p.note %}<p class="untrusted">Model note (not verified): {{ p.note }}</p>{% endif %}
+<div class="actions">
+  <button type="submit" name="choice" value="saved">I saved it</button>
+  <button type="submit" name="choice" value="abort">Abort the run</button>
+</div>
+<p class="note">"I saved it" asks the platform to read the file back; it checks what you saved.</p>

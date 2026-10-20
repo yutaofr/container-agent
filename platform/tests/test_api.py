@@ -29,15 +29,15 @@ def client(h) -> httpx.AsyncClient:
 
 
 async def login(c: httpx.AsyncClient, token=TOKENS["alice"]) -> dict:
-    csrf = (await c.get("/login")).json()["csrf"]
-    r = await c.post("/login", data={"token": token, "csrf": csrf}, headers={"Origin": ORIGIN})
+    csrf = (await c.get("/api/login")).json()["csrf"]
+    r = await c.post("/api/login", data={"token": token, "csrf": csrf}, headers={"Origin": ORIGIN})
     assert r.status_code == 200, r.text
     return {"Origin": ORIGIN, "X-CSRF-Token": r.json()["csrf"]}
 
 
 async def test_login_sets_only_a_session_cookie(h):
     async with client(h) as c:
-        r = await c.get("/login")
+        r = await c.get("/api/login")
         assert "httponly" in r.headers["set-cookie"].lower()
         assert "samesite=strict" in r.headers["set-cookie"].lower()
         headers = await login(c)
@@ -52,22 +52,24 @@ async def test_login_sets_only_a_session_cookie(h):
 )
 async def test_login_needs_the_exact_origin(h, origin, status):
     async with client(h) as c:
-        csrf = (await c.get("/login")).json()["csrf"]
+        csrf = (await c.get("/api/login")).json()["csrf"]
         headers = {"Origin": origin} if origin else {}
-        r = await c.post("/login", data={"token": TOKENS["alice"], "csrf": csrf}, headers=headers)
+        r = await c.post(
+            "/api/login", data={"token": TOKENS["alice"], "csrf": csrf}, headers=headers
+        )
         assert r.status_code == status
 
 
 async def test_login_needs_the_pre_session_and_the_token(h):
     async with client(h) as c:
-        csrf = (await c.get("/login")).json()["csrf"]
+        csrf = (await c.get("/api/login")).json()["csrf"]
         r = await c.post(
-            "/login", data={"token": "x" * 32, "csrf": csrf}, headers={"Origin": ORIGIN}
+            "/api/login", data={"token": "x" * 32, "csrf": csrf}, headers={"Origin": ORIGIN}
         )
         assert (r.status_code, r.json()) == (401, {"error": "login_failed"})
     async with client(h) as c:  # a forged form without the victim's pre-session
         r = await c.post(
-            "/login", data={"token": TOKENS["alice"], "csrf": csrf}, headers={"Origin": ORIGIN}
+            "/api/login", data={"token": TOKENS["alice"], "csrf": csrf}, headers={"Origin": ORIGIN}
         )
         assert r.status_code == 401
 
@@ -160,3 +162,18 @@ async def test_logout_ends_the_session(h):
         assert session.revoked.is_set()
         c.cookies.set("cagent_session", session.id)  # replaying the old cookie
         assert (await c.get("/api/runs")).status_code == 401
+
+
+async def test_the_run_record_is_served_to_its_owner(h):
+    async with client(h) as alice, client(h) as bob:
+        a = await login(alice)
+        await login(bob, TOKENS["bob"])
+        body = {"command_id": "c1", "runner": "laptop-1", "cluster": "demo", "spec": REDIS}
+        run_id = (await alice.post("/api/runs", json=body, headers=a)).json()["run_id"]
+        await h.settle()
+        rec = (await alice.get(f"/api/runs/{run_id}/record?after=0")).json()
+        assert rec["history"] == "complete" and rec["entries"][0]["seq"] == 1
+        assert any(e.get("type") == "published" for e in rec["entries"])
+        assert (await bob.get(f"/api/runs/{run_id}/record")).status_code == 404
+        r = await alice.get(f"/api/runs/{run_id}/record?after=-5")
+        assert (r.status_code, r.json()["error"]) == (422, "bad_cursor")

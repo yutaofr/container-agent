@@ -1,0 +1,29 @@
+<h2>Diagnostic summary</h2>
+{% set obs = run.last_observation %}
+{% set attempt = run.last_observation_attempt %}
+{% if attempt and not attempt.ok %}
+<p class="warn">The latest collection failed at {{ attempt.at | when }}: {{ attempt.reason }}</p>
+{% endif %}
+{% if obs %}
+<p class="note">Received by the platform at {{ obs.received_at | when }}. Redacted error lines and the last log lines, not a live log.</p>
+<table class="services">
+  <thead><tr><th>Service</th><th>State</th><th>Health</th><th>Restarts</th><th>Exit</th></tr></thead>
+  <tbody>
+  {% for svc in obs.services %}
+  <tr>
+    <td>{{ svc.service }}{% if svc.role %} <small>({{ svc.role }})</small>{% endif %}</td>
+    <td>{{ svc.state }}</td><td>{{ svc.health or "—" }}</td>
+    <td>{{ svc.restart_count }}</td><td>{{ svc.exit_code if svc.exit_code is not none else "—" }}</td>
+  </tr>
+  {% if svc.errors or svc.tail %}
+  <tr class="lines"><td colspan="5">
+    {% if svc.errors %}<pre class="errors">{{ svc.errors | join("\n") }}</pre>{% endif %}
+    {% if svc.tail %}<pre class="tail">{{ svc.tail | join("\n") }}</pre>{% endif %}
+  </td></tr>
+  {% endif %}
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="note">No observation yet.</p>
+{% endif %}

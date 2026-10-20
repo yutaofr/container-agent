@@ -1,0 +1,41 @@
+/* cagent pages. No inline styles anywhere: the CSP allows only this file. */
+:root { --fg: #1d1d1f; --muted: #6e6e73; --line: #d2d2d7; --bad: #b3261e; --ok: #1b6e3a; --warn: #8a5300; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.45 system-ui, sans-serif; color: var(--fg); }
+header.top { display: flex; gap: 1rem; align-items: center; padding: .6rem 1.2rem; border-bottom: 1px solid var(--line); }
+header.top .brand { font-weight: 600; text-decoration: none; color: inherit; margin-right: auto; }
+main { max-width: 64rem; margin: 0 auto; padding: 1rem 1.2rem 4rem; }
+.stack { display: grid; gap: .8rem; max-width: 40rem; }
+label { display: grid; gap: .25rem; }
+fieldset { border: 1px solid var(--line); border-radius: 6px; display: grid; gap: .5rem; }
+textarea, input, select { font: inherit; padding: .35rem .5rem; }
+button, .button { font: inherit; padding: .35rem .9rem; border: 1px solid var(--fg); background: #fff; border-radius: 6px; cursor: pointer; text-decoration: none; color: inherit; }
+button.link { border: 0; padding: 0; text-decoration: underline; background: none; }
+button[disabled] { opacity: .5; cursor: default; }
+.error { color: var(--bad); }
+table.runs { border-collapse: collapse; width: 100%; }
+table.runs th, table.runs td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--line); }
+.state { font-size: .85em; padding: .05rem .4rem; border-radius: 4px; border: 1px solid var(--line); }
+.state-healthy { color: var(--ok); } .state-reconcile, .state-escalated { color: var(--warn); }
+.htmx-indicator { opacity: 0; } .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
+pre { overflow-x: auto; background: #f5f5f7; padding: .6rem; border-radius: 6px; }
+section { margin: 1.2rem 0; }
+.note { color: var(--muted); }
+.warn { color: var(--warn); }
+.runner.offline { color: var(--bad); }
+.phase, .runner { margin-left: .6rem; font-size: .9em; }
+table.services { border-collapse: collapse; width: 100%; }
+table.services td, table.services th { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid var(--line); }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: .8rem 1rem; }
+.actions { display: flex; gap: .6rem; flex-wrap: wrap; margin-top: .6rem; }
+.untrusted { border-left: 3px solid var(--warn); padding-left: .5rem; }
+pre.diff span { display: block; } .d-add { color: var(--ok); } .d-del { color: var(--bad); } .d-hunk, .d-file { color: var(--muted); }
+table.preview { border-collapse: collapse; } table.preview td, table.preview th { padding: .25rem .5rem; border-bottom: 1px solid var(--line); text-align: left; }
+.card.stale, .card[data-stale] { opacity: .6; }
+ol.record { list-style: none; padding: 0; }
+ol.record li { padding: .3rem 0; border-bottom: 1px solid var(--line); }
+ol.record .when { color: var(--muted); font-size: .85em; margin-right: .4rem; }
+#record:has(#show-events:not(:checked)) li.event { display: none; }
+.gap { color: var(--warn); }
+.command { margin-left: .4rem; font-size: .9em; color: var(--muted); }
+.banner { background: #fff4e5; border-bottom: 1px solid var(--warn); padding: .6rem 1.2rem; }

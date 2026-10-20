@@ -1,0 +1,27 @@
+{% set p = card.payload %}
+<h2>Recovery plan</h2>
+<p>{% if p.mode == "continue_cluster" %}This new run starts on a cluster with unconfirmed operations; after this, the normal approval follows.{% else %}Continue this run from validate.{% endif %}</p>
+<p>Steps: {{ p.steps | join(" → ") }}</p>
+{% if p.get("build") %}<p>Images: {{ "reused" if p.build.decision == "skip_all" else "rebuilt" }} — {{ p.build.reason }}{% if p.build.services %} ({{ p.build.services | join(", ") }}){% endif %}.</p>{% endif %}
+<fieldset>
+  <legend>Risks</legend>
+  {% for r in p.risks %}
+  {% if r.requires_ack %}
+  <label><input type="checkbox" name="acknowledged" value="{{ r.id }}"> {{ r.text }}</label>
+  {% else %}
+  <p>{{ r.text }}</p>
+  {% endif %}
+  {% else %}
+  <p>None found.</p>
+  {% endfor %}
+</fieldset>
+{% if p.get("check") %}<p class="note">Based on the check at {{ p.check.at | when }}.</p>{% endif %}
+{% if card.diff %}
+<pre class="diff">{% for kind, line in card.diff %}<span class="d-{{ kind }}">{{ line }}</span>
+{% endfor %}</pre>
+{% endif %}
+{% if p.get("compose") %}<details><summary>Compose file</summary><pre>{{ p.compose }}</pre></details>{% endif %}
+<div class="actions">
+  <button type="submit" name="choice" value="approve">Approve recovery</button>
+  <button type="submit" name="choice" value="decline">Decline</button>
+</div>

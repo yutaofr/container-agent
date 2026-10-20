@@ -1,0 +1,26 @@
+{% set p = card.payload %}
+<h2>Approve the compose file</h2>
+{% if card.diff %}
+<p>Changes since you last approved this run:</p>
+<pre class="diff">{% for kind, line in card.diff %}<span class="d-{{ kind }}">{{ line }}</span>
+{% endfor %}</pre>
+<p class="note">The last approved file is not necessarily what last ran: automatic fixes may have changed it since.</p>
+{% endif %}
+<details{% if not card.diff %} open{% endif %}><summary>Full compose file</summary><pre>{{ p.compose }}</pre></details>
+{% if card.rules %}
+<fieldset>
+  <legend>Exceptions this file needs (allow each one you accept)</legend>
+  {% for r in card.rules %}
+  <label><input type="checkbox" name="allow" value="{{ r.rule_id }}"{% if r.checked %} checked{% endif %}>
+    <code>{{ r.rule_id }}</code> — {{ r.detail }}</label>
+  {% endfor %}
+</fieldset>
+{% endif %}
+{% if p.fixes %}
+<p>Fixes applied to the configuration:</p>
+<ul>{% for f in p.fixes %}<li><code>{{ f.rule }}</code>: {{ f.reason or "no reason recorded" }}</li>{% endfor %}</ul>
+{% endif %}
+<div class="actions">
+  <button type="submit" name="choice" value="approve">Approve</button>
+  <button type="submit" name="choice" value="reject">Reject (ends the run)</button>
+</div>

@@ -14,12 +14,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from cagent import web
+from cagent.access import PRE_COOKIE, SESSION_COOKIE, Access, Denied
 from cagent.auth import LoginError, RateLimited, Session, Sessions
 from cagent.events import BadCursor, EventStreamResponse, StreamLimits, event_stream, parse_cursor
 from cagent.runs import Accepted, RunError, RunService
-
-SESSION_COOKIE = "cagent_session"
-PRE_COOKIE = "cagent_pre"
 
 
 class CreateRun(BaseModel):
@@ -30,11 +29,6 @@ class CreateRun(BaseModel):
     cluster: str
     purpose: str | None = None
     spec: dict[str, Any] | None = None
-
-
-class Denied(Exception):
-    def __init__(self, status: int, code: str):
-        self.status, self.code = status, code
 
 
 def _error(status: int, code: str, detail: str = "", snapshot: Any = None) -> JSONResponse:
@@ -75,26 +69,11 @@ def create_app(
     async def invalid(_request: Request, e: RequestValidationError) -> JSONResponse:
         return _error(422, "invalid_command", str(e.errors()))
 
-    def cookie(response: JSONResponse, name: str, value: str, max_age: float) -> None:
-        response.set_cookie(
-            name,
-            value,
-            max_age=int(max_age),
-            httponly=True,
-            samesite="strict",
-            secure=secure_cookies,
-            path="/",
-        )
-
-    def same_origin(request: Request) -> None:
-        if request.headers.get("origin") != origin:  # missing and "null" never match
-            raise Denied(403, "bad_origin")
+    access = Access(sessions, origin, secure_cookies)
+    cookie, same_origin, client = access.cookie, access.same_origin, access.client
 
     def session(request: Request) -> Session:
-        s = sessions.get(request.cookies.get(SESSION_COOKIE))
-        if s is None:
-            raise Denied(401, "login_required")
-        return s
+        return access.require(request)
 
     Live = Annotated[Session, Depends(session)]
 
@@ -102,22 +81,15 @@ def create_app(
         sessions.touch(s)
         return s.user
 
-    def changing(request: Request, s: Live) -> str:
-        same_origin(request)
-        if not Sessions.csrf_ok(s, request.headers.get("x-csrf-token")):
-            raise Denied(403, "bad_csrf")
-        sessions.touch(s)
-        return s.user
+    def changing(request: Request) -> str:
+        return access.changing(request).user
 
     User = Annotated[str, Depends(user)]
     Changing = Annotated[str, Depends(changing)]
 
-    def client(request: Request) -> str:
-        return request.client.host if request.client else "unknown"
+    # --- login (programmatic; the HTML form is cagent.web's /login) ---------------------------
 
-    # --- login -------------------------------------------------------------------------------
-
-    @app.get("/login")
+    @app.get("/api/login")
     async def login_form(request: Request) -> JSONResponse:
         try:
             pre = sessions.new_pre(client(request))
@@ -127,7 +99,7 @@ def create_app(
         cookie(response, PRE_COOKIE, pre.id, sessions.pre_ttl)
         return response
 
-    @app.post("/login")
+    @app.post("/api/login")
     async def login(request: Request) -> JSONResponse:
         same_origin(request)
         form = parse_qs((await request.body()).decode("utf-8", "replace"))
@@ -149,6 +121,8 @@ def create_app(
         sessions.logout(request.cookies.get(SESSION_COOKIE, ""))
         response = JSONResponse({"ok": True})
         response.delete_cookie(SESSION_COOKIE, path="/")
+        if request.headers.get("hx-request"):  # the page's logout button
+            response.headers["HX-Redirect"] = "/login"
         return response
 
     # --- runs --------------------------------------------------------------------------------
@@ -167,6 +141,10 @@ def create_app(
     @app.get("/api/runs/{run_id}")
     async def snapshot(run_id: str, who: User) -> JSONResponse:
         return JSONResponse(await service.snapshot(who, run_id))
+
+    @app.get("/api/runs/{run_id}/record")
+    async def record(run_id: str, who: User, after: int = 0) -> JSONResponse:
+        return JSONResponse(await service.record(who, run_id, after))
 
     @app.post("/api/runs/{run_id}/commands")
     async def submit(run_id: str, request: Request, who: Changing) -> JSONResponse:
@@ -207,4 +185,5 @@ def create_app(
     async def command(run_id: str, command_id: str, who: User) -> JSONResponse:
         return JSONResponse(await service.command(who, run_id, command_id))
 
+    web.install(app, service, access)
     return app

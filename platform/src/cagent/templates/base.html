@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content="{{ htmx_config }}">
+  <title>{% block title %}cagent{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+  {% block scripts %}{% endblock %}
+</head>
+<body{% if csrf %} hx-headers='{{ {"X-CSRF-Token": csrf} | tojson }}'{% endif %}>
+  <header class="top">
+    <a class="brand" href="/">cagent</a>
+    {% if user is defined %}
+    <span class="who">{{ user }}</span>
+    <button type="button" class="link" hx-post="/logout" hx-swap="none">Log out</button>
+    {% endif %}
+  </header>
+  <main>
+    {% block main %}{% endblock %}
+  </main>
+</body>
+</html>

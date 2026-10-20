@@ -39,10 +39,10 @@ def write_config(tmp: Path, web_port: int, hub_port: int = 0, fast: bool = False
 
 
 async def login(c: httpx.AsyncClient, user: str = "alice") -> dict[str, str]:
-    csrf = (await c.get("/login")).json()["csrf"]
+    csrf = (await c.get("/api/login")).json()["csrf"]
     origin = str(c.base_url).rstrip("/")
     token = ENV[f"CAGENT_{user.upper()}"]
-    r = await c.post("/login", data={"token": token, "csrf": csrf}, headers={"Origin": origin})
+    r = await c.post("/api/login", data={"token": token, "csrf": csrf}, headers={"Origin": origin})
     r.raise_for_status()
     return {"Origin": origin, "X-CSRF-Token": r.json()["csrf"]}
 
