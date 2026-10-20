@@ -313,8 +313,8 @@ Every task ships its own tests; a final task combines them.
 
 | Method | Path | Body or parameters | Answer |
 |---|---|---|---|
-| GET | `/login` | — | `{csrf}`; sets the `cagent_pre` cookie |
-| POST | `/login` | form `token`, `csrf`; `Origin` | `{user, csrf}`; sets `cagent_session`, clears `cagent_pre` |
+| GET | `/api/login` | — | `{csrf}`; sets the `cagent_pre` cookie (moved from `/login` in M8b, which made `/login` the HTML form) |
+| POST | `/api/login` | form `token`, `csrf`; `Origin` | `{user, csrf}`; sets `cagent_session`, clears `cagent_pre` |
 | POST | `/logout` | `X-CSRF-Token`, `Origin` | `{ok}`; closes the session's event streams |
 | GET | `/api/runs` | — | the user's runs |
 | POST | `/api/runs` | `{command_id, runner, cluster, purpose \| spec}` | `202 {command_id, run_id, accepted_revision, execution_id}` |
@@ -322,6 +322,7 @@ Every task ships its own tests; a final task combines them.
 | POST | `/api/runs/{id}/commands` | `{command_id, expected_revision, action, pending_id?, decision?}`, `action` ∈ `answer`, `refresh`, `review_recovery`, `abandon` | `202 {command_id, run_id, accepted_revision, execution_id}`; `Cagent-Replay: true` on a repeat |
 | GET | `/api/runs/{id}/commands/{command_id}` | — | `{command_id, kind, status, effect, reason, response}` |
 | GET | `/api/runs/{id}/events` | `Last-Event-ID` or `?after=` | `text/event-stream` (section 11) |
+| GET | `/api/runs/{id}/record` | `?after=` | the run record (M8b design, section 4) |
 
 Errors are `{error, detail?, snapshot?}`: `401 login_required`, `401 login_failed`, `403 bad_origin`, `403 bad_csrf`, `404 not_found`, `409 stale | not_waiting | not_reconcile | command_id_reused | cluster_name_taken | cluster_busy | runner_offline | runner_unavailable | check_needed | no_compose | plan_stale` (stale ones carry the snapshot), `422 invalid_command | invalid_decision | invalid_cluster | invalid_input | invalid_spec | bad_cursor`, `429 rate_limited | too_many_streams`, `503 shutting_down`.
 

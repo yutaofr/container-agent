@@ -19,3 +19,21 @@ jobs:
         run: make platform-test
       - name: Generated compose passes runner validate
         run: make e2e
+
+  # The browser suite: Chromium only, kept out of make platform-test.
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install dependencies and Chromium
+        working-directory: platform
+        run: uv sync --locked && uv run playwright install --with-deps chromium
+      - name: Browser tests
+        run: make browser-test
+      - name: Keep traces and screenshots of failures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-failures
+          path: platform/test-results

@@ -140,6 +140,17 @@ FakeRunner scenarios check the platform and page contracts; the Go worker and Do
 - A user completes create → questions → approval → healthy from Chromium, and every pending kind and the recovery path work from the page.
 - The browser scenarios in section 8 pass in CI, and the backend suites still pass without a browser.
 
-## 10. Out of scope
+## 10. Implementation findings
+
+- **`Referrer-Policy: no-referrer` breaks the Origin check.** Under it Chromium sends `Origin: null` on the page's own POSTs (form and fetch), and the exact Origin check refuses them. The policy is `same-origin`: same-origin requests carry their origin; nothing leaks to other sites.
+- **An open event stream kept uvicorn's graceful shutdown waiting forever** (from M8a): a SIGTERM never stopped a platform with a browser tab open. `web_server` now sets `timeout_graceful_shutdown` (5 s; 1 s in tests).
+- **Starlette's `BaseHTTPMiddleware` breaks the event stream's own disconnect handling**: after a stream ended, the next request failed with 500. Security headers come from a plain ASGI middleware that only adds headers to `http.response.start`.
+- **htmx dispatches `HX-Trigger` events before it swaps.** A 409's stale signal retired the card before its message was swapped in. The server sends `HX-Trigger-After-Swap`, and the page blocks only late successes (2xx), never error messages, from swapping into an old card.
+- **Masking covers the question's records, not the compose that uses the answer.** A `missing_env` answer is masked in the record, but the next approval shows the compose that will run, value included: approval evidence must be what actually runs. The M8a approval records already held that compose.
+- **Chromium compiles `pattern` attributes with the `v` flag**, where `-` inside a character class must be escaped; the console check in the browser tests caught it.
+- `/runs/new` must be registered before `/runs/{run_id}`; Python Playwright has no `expect.poll` (tests use `wait_for_function`); `wait_for_url("/runs/*")` matches `/runs/new` itself, so tests wait for a 32-hex run id.
+- Measurements on the dev machine: the backend suite 485 passed / 11 skipped in ~17 s; the browser suite 11 tests in ~30 s (the crash-and-recovery test ~10 s of it), stable across repeated runs.
+
+## 11. Out of scope
 
 Free questions about a run; continuous log streaming; destroying a cluster from the page; a YAML editor; Firefox and WebKit; ongoing watch after `healthy`.
