@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 import jsonpatch
+from jsonpointer import JsonPointer, JsonPointerException
 
 # The gate every automatic fix passes (design 5.4). It is deliberately strict: today only the
 # in-repo T0 rules produce patches, but M7's model-written patches must clear the same check.
@@ -121,3 +122,49 @@ def fingerprint(compose: dict[str, Any]) -> str:
     """Stable hash of a compose document, used to detect a fix loop returning to a past state."""
     canonical = json.dumps(compose, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def _at(doc: Any, path: str) -> dict[str, Any]:
+    """What a JSON Pointer names: {"present": False} when nothing is there, which differs
+    from a present null."""
+    try:
+        value = JsonPointer(path).resolve(doc)
+    except JsonPointerException:
+        return {"present": False}
+    return {"present": True, "value": copy.deepcopy(value)}
+
+
+def _parent_is_list(doc: Any, path: str) -> bool:
+    parent = path.rsplit("/", 1)[0]
+    return isinstance(_at(doc, parent).get("value"), list) if parent else False
+
+
+def preview(compose: dict[str, Any], patch: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+    """Each operation's effect, applied in order to a copy of compose, as a person approving
+    the patch should see it; None when the patch does not apply, so nothing is guessed.
+
+    before/after are {"present": bool, "value": ...}. An add into an array inserts (nothing
+    was there before); a remove leaves nothing at that path (later elements move up, they
+    are not the "after"); a test changes nothing and is shown as a check."""
+    doc = copy.deepcopy(compose)
+    steps = []
+    for op in patch:
+        path = op.get("path", "")
+        inserts = op.get("op") == "add" and _parent_is_list(doc, path)
+        before = {"present": False} if inserts else _at(doc, path)
+        try:
+            doc = apply(doc, [op])
+        except (jsonpatch.JsonPatchException, JsonPointerException):
+            return None
+        if op["op"] == "remove":
+            after = {"present": False}
+        elif op["op"] == "test":
+            after = before
+        elif inserts and path.endswith("/-"):
+            after = {"present": True, "value": copy.deepcopy(op.get("value"))}
+        else:
+            after = _at(doc, path)
+        steps.append(
+            {"op": op["op"], "path": path, "before": before, "after": after, "insert": inserts}
+        )
+    return steps

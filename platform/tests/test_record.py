@@ -182,7 +182,7 @@ async def test_the_other_kinds_are_kept_too(store, catalog, kind, waiting, decis
     await answer(h, run_id, decision, command_id="k1")
     es, _ = await entries(h, run_id)
     published, decided = [e for e in es if e.get("kind") == kind]
-    assert published["payload"] == waiting
+    assert {k: published["payload"][k] for k in waiting} == waiting
     assert decided["decision"] == kept
 
 

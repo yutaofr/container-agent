@@ -26,6 +26,7 @@ from cagent.catalog import NAME_PATTERN
 from cagent.dispatch import MUTATING, Execution, current
 from cagent.hub import RunnerHub, status
 from cagent.orchestrator import EventSink, Orchestrator, Status, service_summary
+from cagent.patches import preview
 from cagent.record import decision_record, mask_published
 from cagent.record import page as record_page
 from cagent.recovery import RESUME, build_plan, facts_of, make_recovery_initial
@@ -128,6 +129,9 @@ def check_decision(kind: str, payload: dict[str, Any], decision: dict[str, Any])
             raise RunError(422, "invalid_decision", "a rejection allows nothing")
         if len(set(d["allow"])) != len(d["allow"]) or not set(d["allow"]) <= findings:
             raise RunError(422, "invalid_decision", "allow names only this candidate's findings")
+    if kind == "patch_approval" and d["approve"] and "preview" in payload:
+        if payload["preview"] is None:
+            raise RunError(422, "invalid_decision", "the patch has no valid preview to approve")
     if kind == "recovery":
         acks = d["acknowledged"]
         if d["approve"] and (len(set(acks)) != len(acks) or set(acks) != set(payload["required"])):
@@ -1197,6 +1201,11 @@ class RunService:
                 payload = {k: status.waiting.get(k) for k in PAYLOAD_FIELDS[kind]}
                 if kind == "approval":
                     payload["previous_approved"] = await self._previous_approved(t, run_id)
+                if kind == "patch_approval":
+                    # The evidence a person approves is fixed now: the patch's effect, op by
+                    # op on the current compose, and the observation the model saw.
+                    payload["preview"] = preview(status.compose or {}, payload["patch"])
+                    payload["evidence"] = run["last_observation"]
                 pending = {
                     "pending_id": self.new_id(),
                     "kind": kind,
