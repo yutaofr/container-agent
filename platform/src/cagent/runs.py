@@ -463,6 +463,20 @@ class RunService:
             "history": run["history"],
         }
 
+    async def runners(self, user: str) -> list[dict[str, Any]]:
+        """The user's Runners with their stored status."""
+        names = sorted(self.users.get(user, set()))
+        async with self.store.read() as t:
+            rows = {r["runner"]: r for r in await t.all("SELECT * FROM runner_status")}
+        return [
+            {
+                "id": n,
+                "online": bool(rows[n]["online"]) if n in rows else False,
+                "instance_id": rows[n]["instance_id"] if n in rows else None,
+            }
+            for n in names
+        ]
+
     async def list_runs(self, user: str) -> list[dict[str, Any]]:
         async with self.store.read() as t:
             rows = await t.all(

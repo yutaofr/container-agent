@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}New run · cagent{% endblock %}
+{% block main %}
+<h1>New run</h1>
+<form class="stack" hx-post="/runs" hx-target="#form-error" hx-disabled-elt="find button">
+  <input type="hidden" name="command_id" value="{{ command_id }}">
+  <label>Runner
+    <select name="runner" required>
+      {% for r in runners %}
+      <option value="{{ r.id }}">{{ r.id }} — {{ "online" if r.online else "offline" }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Cluster name <input name="cluster" required pattern="[a-z0-9][a-z0-9_-]*"></label>
+  <fieldset>
+    <legend>What to build</legend>
+    <label><input type="radio" name="input" value="purpose" checked> A purpose, in a sentence</label>
+    <textarea name="purpose" rows="3" aria-label="Purpose"></textarea>
+    <label><input type="radio" name="input" value="spec"> A cluster spec, in YAML</label>
+    <textarea name="spec" rows="10" aria-label="Spec YAML"></textarea>
+  </fieldset>
+  <div id="form-error"></div>
+  <button type="submit">Create run</button>
+</form>
+{% endblock %}

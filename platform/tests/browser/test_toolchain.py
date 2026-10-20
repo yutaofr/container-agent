@@ -9,9 +9,9 @@ from .conftest import fail_on_purpose
 
 async def test_a_page_logs_in_and_hears_an_event(page: Page, running):
     api = page.request
-    csrf = (await (await api.get(f"{running.base}/login")).json())["csrf"]
+    csrf = (await (await api.get(f"{running.base}/api/login")).json())["csrf"]
     r = await api.post(
-        f"{running.base}/login",
+        f"{running.base}/api/login",
         form={"token": ENV["CAGENT_ALICE"], "csrf": csrf},
         headers={"Origin": running.base},
     )

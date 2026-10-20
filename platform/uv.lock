@@ -254,6 +254,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "fastapi" },
+    { name = "jinja2" },
     { name = "jsonpatch" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
@@ -279,6 +280,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "fastapi", specifier = ">=0.146.0" },
+    { name = "jinja2", specifier = ">=3.1.6" },
     { name = "jsonpatch", specifier = ">=1.33" },
     { name = "langgraph", specifier = ">=1.2" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1.2" },
