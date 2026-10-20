@@ -1,5 +1,10 @@
 """Durable records for runs: the registry the web reads, commands, approvals, recovery plans,
-cluster ownership and marks, tool dispatches, Runner status, and a bounded event log.
+cluster ownership and marks, tool dispatches, Runner status, a bounded event log, and the
+pending items each run published and the decisions taken on them.
+
+Events and pending records share one sequence per run, so a run record can be merged in
+order; only events are trimmed. A gap in events is known from the trimming watermark, never
+from holes in the sequence, which pending records leave on purpose.
 
 One SQLite file holds these tables and LangGraph's checkpoints, but the two are written
 through different connections and never in one transaction: nothing here may assume a
@@ -41,7 +46,9 @@ CREATE TABLE IF NOT EXISTS runs (
     verified_at REAL,
     outcome TEXT,
     event_seq INTEGER NOT NULL DEFAULT 0,
-    min_event_seq INTEGER NOT NULL DEFAULT 1
+    min_event_seq INTEGER NOT NULL DEFAULT 1,
+    events_pruned_through_seq INTEGER NOT NULL DEFAULT 0,
+    history TEXT NOT NULL DEFAULT 'partial'
 );
 CREATE TABLE IF NOT EXISTS commands (
     user TEXT NOT NULL,
@@ -104,6 +111,19 @@ CREATE TABLE IF NOT EXISTS runner_status (
     instance_id TEXT,
     changed_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pendings (
+    run_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    pending_id TEXT NOT NULL,
+    record_type TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    at REAL NOT NULL,
+    payload TEXT NOT NULL,
+    user TEXT,
+    command_id TEXT,
+    PRIMARY KEY (run_id, seq),
+    UNIQUE (pending_id, record_type)
+);
 CREATE TABLE IF NOT EXISTS events (
     run_id TEXT NOT NULL,
     seq INTEGER NOT NULL,
@@ -132,6 +152,13 @@ _JSON = {
     "content",
     "decision",
     "payload",
+}
+
+# Columns added after M8a, with the value existing rows get: runs from before the run
+# record existed have only a partial history.
+MIGRATIONS = {
+    "events_pruned_through_seq": "INTEGER NOT NULL DEFAULT 0",
+    "history": "TEXT NOT NULL DEFAULT 'partial'",
 }
 
 # Runs in these states hold their cluster's execution lock; the rest are final.
@@ -247,6 +274,41 @@ class Tx:
         )
         return row["revision"]
 
+    async def next_seq(self, run_id: str) -> int:
+        """The next number in the run's sequence, shared by events and pending records."""
+        row = await self.one(
+            "UPDATE runs SET event_seq = event_seq + 1 WHERE id = ? RETURNING event_seq", run_id
+        )
+        return row["event_seq"]
+
+    async def append_pending(
+        self,
+        run_id: str,
+        record_type: str,
+        pending_id: str,
+        kind: str,
+        payload: dict[str, Any],
+        user: str | None = None,
+        command_id: str | None = None,
+    ) -> int:
+        """Append a published pending item or a decision on one. Never trimmed or changed;
+        (pending_id, record_type) is unique, so a retried transaction cannot record twice."""
+        seq = await self.next_seq(run_id)
+        await self.insert(
+            "pendings",
+            run_id=run_id,
+            seq=seq,
+            pending_id=pending_id,
+            record_type=record_type,
+            kind=kind,
+            at=self.store.clock(),
+            payload=payload,
+            user=user,
+            command_id=command_id,
+        )
+        self.touched.add(run_id)
+        return seq
+
     async def append_event(
         self,
         run_id: str,
@@ -255,12 +317,9 @@ class Tx:
         execution_id: str | None = None,
         task_id: str | None = None,
     ) -> int:
-        """Append one event under the run's persisted counter and trim the run's log to its
-        newest keep_events. Numbering never depends on which rows are still kept."""
-        row = await self.one(
-            "UPDATE runs SET event_seq = event_seq + 1 WHERE id = ? RETURNING event_seq", run_id
-        )
-        seq = row["event_seq"]
+        """Append one event and trim the run's log to its newest keep_events event rows,
+        recording the highest seq deleted. Numbering never depends on what is kept."""
+        seq = await self.next_seq(run_id)
         await self.insert(
             "events",
             run_id=run_id,
@@ -271,11 +330,19 @@ class Tx:
             at=self.store.clock(),
             payload=bounded(payload, self.store.max_payload),
         )
-        floor = seq - self.store.keep_events + 1
-        if floor > 1:
-            await self.run("DELETE FROM events WHERE run_id = ? AND seq < ?", run_id, floor)
+        cut = await self.one(
+            "SELECT seq FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT 1 OFFSET ?",
+            run_id,
+            self.store.keep_events,
+        )
+        if cut is not None:
+            await self.run("DELETE FROM events WHERE run_id = ? AND seq <= ?", run_id, cut["seq"])
             await self.run(
-                "UPDATE runs SET min_event_seq = MAX(min_event_seq, ?) WHERE id = ?", floor, run_id
+                "UPDATE runs SET events_pruned_through_seq = MAX(events_pruned_through_seq, ?),"
+                " min_event_seq = MAX(min_event_seq, ?) WHERE id = ?",
+                cut["seq"],
+                cut["seq"] + 1,
+                run_id,
             )
         self.touched.add(run_id)
         return seq
@@ -308,6 +375,11 @@ class Store:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA busy_timeout=5000")
         await db.executescript(SCHEMA)
+        async with db.execute("PRAGMA table_info(runs)") as cur:
+            have = {row["name"] for row in await cur.fetchall()}
+        for column, definition in MIGRATIONS.items():
+            if column not in have:
+                await db.execute(f"ALTER TABLE runs ADD COLUMN {column} {definition}")
         return cls(db, **kwargs)
 
     async def close(self) -> None:
@@ -342,12 +414,14 @@ class Store:
     async def events_after(
         self, run_id: str, after: int, limit: int, max_bytes: int
     ) -> list[dict[str, Any]] | None:
-        """The next page of events with seq > after, in order, or None when the cursor is
-        outside what is kept (trimmed away, or past the last event): the reader must resync.
-        Each page is its own short read, so the boundary is checked again for every page."""
+        """The next page of events with seq > after, in order, or None when events after the
+        cursor were trimmed away, or the cursor is past the sequence: the reader must resync.
+        Each page is its own short read, so the watermark is checked again for every page."""
         async with self.read() as t:
-            run = await t.one("SELECT event_seq, min_event_seq FROM runs WHERE id = ?", run_id)
-            if run is None or after < run["min_event_seq"] - 1 or after > run["event_seq"]:
+            run = await t.one(
+                "SELECT event_seq, events_pruned_through_seq FROM runs WHERE id = ?", run_id
+            )
+            if run is None or after < run["events_pruned_through_seq"] or after > run["event_seq"]:
                 return None
             rows = await t.all(
                 "SELECT seq, execution_id, task_id, type, at, payload FROM events"

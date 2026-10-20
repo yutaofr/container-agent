@@ -26,6 +26,8 @@ from cagent.catalog import NAME_PATTERN
 from cagent.dispatch import MUTATING, Execution, current
 from cagent.hub import RunnerHub, status
 from cagent.orchestrator import EventSink, Orchestrator, Status, service_summary
+from cagent.record import decision_record, mask_published
+from cagent.record import page as record_page
 from cagent.recovery import RESUME, build_plan, facts_of, make_recovery_initial
 from cagent.spec import ClusterSpec
 from cagent.store import ACTIVE_STATES, Store
@@ -377,6 +379,84 @@ class RunService:
             "watching": False,  # nothing watches a cluster after it passed acceptance
             "event_seq": run["event_seq"],
             "min_event_seq": run["min_event_seq"],
+            "events_pruned_through": run["events_pruned_through_seq"],
+            "history": run["history"],
+        }
+
+    async def record(
+        self, user: str, run_id: str, after: int = 0, limit: int = 200, max_bytes: int = 256_000
+    ) -> dict[str, Any]:
+        """The run record after a cursor: pending items as published, decisions with their
+        command's current result, and kept events, in one sequence and one read. A trimmed
+        stretch of events is reported, never skipped over: pending rows behind it still come."""
+        async with self.store.read() as t:
+            run = self._visible(user, await t.get_run(run_id))
+            if after < 0 or after > run["event_seq"]:
+                raise RunError(422, "bad_cursor")
+            rows = await t.all(
+                "SELECT * FROM pendings WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+                run_id,
+                after,
+                limit + 1,
+            )
+            events = await t.all(
+                "SELECT seq, execution_id, task_id, type, at, payload FROM events"
+                " WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+                run_id,
+                after,
+                limit + 1,
+            )
+            kept = {
+                r["pending_id"]
+                for r in await t.all(
+                    "SELECT pending_id FROM pendings"
+                    " WHERE run_id = ? AND record_type = 'published'",
+                    run_id,
+                )
+            }
+            commands = {
+                (c["user"], c["command_id"]): c
+                for c in await t.all("SELECT * FROM commands WHERE run_id = ?", run_id)
+            }
+        pendings = []
+        for r in rows:
+            entry = {
+                "seq": r["seq"],
+                "at": r["at"],
+                "source": "pending",
+                "type": r["record_type"],
+                "pending_id": r["pending_id"],
+                "kind": r["kind"],
+            }
+            if r["record_type"] == "published":
+                entry["payload"] = r["payload"]
+            else:
+                c = commands.get((r["user"], r["command_id"]))
+                entry.update(
+                    decision=r["payload"],
+                    user=r["user"],
+                    published=r["pending_id"] in kept,
+                    command=(
+                        {k: c[k] for k in ("command_id", "status", "effect", "reason")}
+                        if c
+                        else None
+                    ),
+                )
+            pendings.append(entry)
+        evs = []
+        for e in events:
+            entry = {"source": "event", **e}
+            if e["type"] == "run_state" and e["payload"].get("pending_id"):
+                entry["pending_kept"] = e["payload"]["pending_id"] in kept
+            evs.append(entry)
+        entries, more = record_page(pendings, evs, limit, max_bytes)
+        return {
+            "entries": entries,
+            "after": entries[-1]["seq"] if entries else after,
+            "more": more,
+            "events_pruned_through": run["events_pruned_through_seq"],
+            "gap": after < run["events_pruned_through_seq"],
+            "history": run["history"],
         }
 
     async def list_runs(self, user: str) -> list[dict[str, Any]]:
@@ -456,6 +536,15 @@ class RunService:
                 return replay
             run = await self._waiting(t, run_id, env)  # again, inside Tx1
             pending, now = run["pending"], self.clock()
+            await t.append_pending(
+                run_id,
+                "decided",
+                pending["pending_id"],
+                pending["kind"],
+                decision_record(pending["kind"], pending["payload"], decision),
+                user=user,
+                command_id=env.command_id,
+            )
             if pending["kind"] in ("approval", "patch_approval", "recovery"):
                 await self._record_approval(t, user, run_id, pending, decision, now)
             if plan is not None and not decision["approve"]:
@@ -520,6 +609,7 @@ class RunService:
         revision = await t.bump_revision(run["id"])
         if pending is not None:
             pending = {**pending, "revision": revision}
+            await self._publish(t, run["id"], pending)
         body = {
             "command_id": command_id,
             "run_id": run["id"],
@@ -879,6 +969,7 @@ class RunService:
                 created_at=now,
                 state=state,
                 revision=1,
+                history="complete",
                 thread_id=run_id,
                 executions=0 if marks else 1,
                 execution_id=None if marks else execution_id,
@@ -1114,6 +1205,7 @@ class RunService:
                     "payload": payload,
                     "interrupt_id": status.interrupt_id,
                 }
+                await self._publish(t, run_id, pending)
                 state = "waiting"
             elif status.outcome in TERMINAL:
                 state = TERMINAL[status.outcome]
@@ -1148,6 +1240,18 @@ class RunService:
                 },
                 execution_id,
             )
+
+    @staticmethod
+    async def _publish(t, run_id: str, pending: dict[str, Any]) -> None:
+        """Keep what a pending item showed, as published, in the run record."""
+        kind = pending["kind"]
+        await t.append_pending(
+            run_id,
+            "published",
+            pending["pending_id"],
+            kind,
+            mask_published(kind, pending["payload"]),
+        )
 
     @staticmethod
     async def _clear_marks(t, run: dict[str, Any]) -> None:

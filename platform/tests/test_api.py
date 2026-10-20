@@ -160,3 +160,18 @@ async def test_logout_ends_the_session(h):
         assert session.revoked.is_set()
         c.cookies.set("cagent_session", session.id)  # replaying the old cookie
         assert (await c.get("/api/runs")).status_code == 401
+
+
+async def test_the_run_record_is_served_to_its_owner(h):
+    async with client(h) as alice, client(h) as bob:
+        a = await login(alice)
+        await login(bob, TOKENS["bob"])
+        body = {"command_id": "c1", "runner": "laptop-1", "cluster": "demo", "spec": REDIS}
+        run_id = (await alice.post("/api/runs", json=body, headers=a)).json()["run_id"]
+        await h.settle()
+        rec = (await alice.get(f"/api/runs/{run_id}/record?after=0")).json()
+        assert rec["history"] == "complete" and rec["entries"][0]["seq"] == 1
+        assert any(e.get("type") == "published" for e in rec["entries"])
+        assert (await bob.get(f"/api/runs/{run_id}/record")).status_code == 404
+        r = await alice.get(f"/api/runs/{run_id}/record?after=-5")
+        assert (r.status_code, r.json()["error"]) == (422, "bad_cursor")

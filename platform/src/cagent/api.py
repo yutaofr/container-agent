@@ -168,6 +168,10 @@ def create_app(
     async def snapshot(run_id: str, who: User) -> JSONResponse:
         return JSONResponse(await service.snapshot(who, run_id))
 
+    @app.get("/api/runs/{run_id}/record")
+    async def record(run_id: str, who: User, after: int = 0) -> JSONResponse:
+        return JSONResponse(await service.record(who, run_id, after))
+
     @app.post("/api/runs/{run_id}/commands")
     async def submit(run_id: str, request: Request, who: Changing) -> JSONResponse:
         try:
