@@ -6,7 +6,7 @@ import json
 from playwright.async_api import Page, expect
 
 from ..test_runs_commands import ORDERS_WITHOUT_ENV
-from .conftest import log_in
+from .conftest import RUN_URL, log_in
 
 
 async def test_a_user_runs_the_whole_flow_from_the_browser(page: Page, running):
@@ -16,7 +16,7 @@ async def test_a_user_runs_the_whole_flow_from_the_browser(page: Page, running):
     await page.check('input[name="input"][value="spec"]')
     await page.fill('textarea[name="spec"]', json.dumps(ORDERS_WITHOUT_ENV))
     await page.click('button:has-text("Create run")')
-    await page.wait_for_url(f"{running.base}/runs/*")
+    await page.wait_for_url(RUN_URL)
 
     card = page.locator('#pending article[data-kind="question"]')
     await expect(card).to_contain_text("SPRING_PROFILES_ACTIVE")

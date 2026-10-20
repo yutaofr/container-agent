@@ -8,6 +8,7 @@ Run with the session loop the Playwright fixtures need, given explicitly:
 
 import asyncio
 import os
+import re
 from dataclasses import dataclass
 
 import pytest_asyncio
@@ -20,6 +21,7 @@ from ..fakerunner import FakeRunner
 from ..serverharness import ENV, RUNNER_TOKEN, free_port, write_config
 from ..simcluster import SimCluster
 
+RUN_URL = re.compile(r"/runs/[0-9a-f]{32}$")
 FAST = Settings(poll_interval_s=0.05, stability_window_s=0.1, startup_timeout_s=5)
 
 
@@ -71,3 +73,28 @@ async def log_in(page, base: str, user: str = "alice") -> Console:
     await page.click('button[type="submit"]')
     await page.wait_for_url(f"{base}/")
     return console
+
+
+async def create_run(page, base: str, spec: dict, cluster: str = "demo") -> str:
+    """Create a run from the new-run form; return its id once its page is open."""
+    import json
+
+    await page.goto(f"{base}/runs/new")
+    await page.fill('input[name="cluster"]', cluster)
+    await page.check('input[name="input"][value="spec"]')
+    await page.fill('textarea[name="spec"]', json.dumps(spec))
+    await page.click('button:has-text("Create run")')
+    await page.wait_for_url(RUN_URL)
+    return page.url.rsplit("/", 1)[1]
+
+
+async def put_pending(running: Running, run_id: str, kind: str, payload: dict, compose=None):
+    """A test hook through the service, never an HTTP route: make the run wait on an item
+    of any kind, as an execution would."""
+    from cagent.orchestrator import Status
+
+    service = running.platform.service
+    async with running.platform.store.tx() as t:
+        await t.update_run(run_id, state="running", pending=None, execution_id="hook")
+    status = Status(None, {"kind": kind, **payload}, compose, [], "hook")
+    await service._finished(run_id, "hook", ("alice", "hook"), status)
