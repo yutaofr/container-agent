@@ -24,8 +24,10 @@ cagent-platform = "cagent.server:main"
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "playwright>=1.64.0",
     "pytest>=8.3",
     "pytest-asyncio>=1.4.0",
+    "pytest-playwright-asyncio>=0.10.0",
     "ruff>=0.8",
 ]
 

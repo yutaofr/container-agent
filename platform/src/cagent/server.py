@@ -74,7 +74,10 @@ class Platform:
         await self._stack.aclose()
 
 
-def web_server(platform: Platform, port: int | None = None) -> uvicorn.Server:
+def web_server(platform: Platform, port: int | None = None, graceful_s: int = 5) -> uvicorn.Server:
+    """The HTTP server. Open event streams never end by themselves, so shutdown waits for
+    them at most graceful_s seconds before cancelling them; otherwise SIGTERM would wait for
+    every browser tab to close."""
     c = platform.config
     return uvicorn.Server(
         uvicorn.Config(
@@ -85,6 +88,7 @@ def web_server(platform: Platform, port: int | None = None) -> uvicorn.Server:
             lifespan="off",
             proxy_headers=False,  # never trust forwarded headers
             log_level="info",
+            timeout_graceful_shutdown=graceful_s,
         )
     )
 

@@ -113,3 +113,24 @@ async def test_streams_check_access_and_cursors(running):
         assert (await bob.get(f"/api/runs/{run_id}/events")).status_code == 404
     async with httpx.AsyncClient(base_url=c.base_url) as nobody:
         assert (await nobody.get(f"/api/runs/{run_id}/events")).status_code == 401
+
+
+async def test_shutdown_does_not_wait_for_open_event_streams(tmp_path):
+    """An open stream never ends by itself; stopping must not wait for every browser tab."""
+    port = free_port()
+    config = load_config(write_config(tmp_path, port), ENV)
+    async with Platform(config, FAST) as platform:
+        server = web_server(platform, graceful_s=1)
+        serving = asyncio.create_task(server.serve())
+        async with asyncio.timeout(10):
+            while not server.started:
+                await asyncio.sleep(0.01)
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=10) as c:
+            headers = await login(c)
+            body = {"command_id": "c1", "runner": "laptop-1", "cluster": "demo", "spec": REDIS}
+            run_id = (await c.post("/api/runs", json=body, headers=headers)).json()["run_id"]
+            async with c.stream("GET", f"/api/runs/{run_id}/events?after=0") as r:
+                assert r.status_code == 200
+                server.should_exit = True
+                async with asyncio.timeout(5):
+                    await serving  # returns although the stream is still open

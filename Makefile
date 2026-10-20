@@ -1,4 +1,4 @@
-.PHONY: runner-test runner-integration runner-build platform-test e2e e2e-llm
+.PHONY: runner-test runner-integration runner-build platform-test browser-test e2e e2e-llm
 
 runner-test:
 	cd runner && test -z "$$(gofmt -l .)" && go vet ./... && go test ./...
@@ -11,7 +11,12 @@ runner-build:
 	cd runner && go build -o ../bin/cagent-runner ./cmd/cagent-runner
 
 platform-test:
-	cd platform && uv run ruff check . && uv run ruff format --check . && uv run pytest
+	cd platform && uv run ruff check . && uv run ruff format --check . && uv run pytest --ignore=tests/browser
+
+# The browser suite: Playwright's async fixtures need the session event loop, given here
+# explicitly. Needs Chromium: cd platform && uv run playwright install chromium
+browser-test:
+	cd platform && uv run pytest tests/browser -o asyncio_default_fixture_loop_scope=session -o asyncio_default_test_loop_scope=session --browser chromium --tracing retain-on-failure --screenshot only-on-failure --output test-results
 
 # Generated compose files must pass the real validate command, the real Runner must
 # answer the hub and reconnect after a hub restart, the orchestrator must heal a real
