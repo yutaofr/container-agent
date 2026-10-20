@@ -243,7 +243,9 @@
       expire();
       return;
     }
-    // A late answer never replaces a newer card; the record shows its command's result.
+    // A late "accepted" never replaces a newer card; the record shows its command's result.
+    // Errors (409, 422) go to the card's own error area and are always shown.
+    if (ev.detail.xhr.status >= 300) return;
     const region = document.getElementById("pending");
     const card = ev.detail.requestConfig && ev.detail.requestConfig.elt.closest("article");
     if (card && (!region.contains(card) || card.dataset.stale)) ev.detail.shouldSwap = false;

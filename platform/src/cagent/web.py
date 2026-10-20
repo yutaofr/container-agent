@@ -413,8 +413,8 @@ def install(app: FastAPI, service: RunService, access: Access) -> None:
         response = render("card_error.html", status, error=message, stale=stale)
         response.headers["HX-Retarget"] = target
         response.headers["HX-Reswap"] = "innerHTML"
-        if stale:
-            response.headers["HX-Trigger"] = "cagent:stale"
+        if stale:  # after the swap, so the message is in place before the card is retired
+            response.headers["HX-Trigger-After-Swap"] = "cagent:stale"
         return response
 
     @app.get("/runs/{run_id}/pendings/{pending_id}/files/{index}")

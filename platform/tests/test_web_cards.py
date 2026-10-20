@@ -122,7 +122,7 @@ async def test_a_second_answer_to_one_card_is_a_conflict_shown_in_the_card(web):
         assert other.status_code == 409 and "already answered" in other.text
         assert other.headers["hx-retarget"] == f"#error-{fields['pending_id']}"
         assert other.headers["hx-reswap"] == "innerHTML"
-        assert other.headers["hx-trigger"] == "cagent:stale"
+        assert other.headers["hx-trigger-after-swap"] == "cagent:stale"
 
 
 async def test_a_form_without_a_valid_choice_is_refused_in_place(web):
