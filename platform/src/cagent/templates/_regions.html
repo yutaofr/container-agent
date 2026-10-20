@@ -1,0 +1,11 @@
+<section id="status" data-region="status" data-seq="{{ run.event_seq }}" aria-label="Status">
+  {% include "_status.html" %}
+</section>
+<section id="summary" data-region="summary" data-seq="{{ run.event_seq }}" aria-label="Diagnostic summary">
+  {% include "_summary.html" %}
+</section>
+<section id="pending" data-region="pending" data-seq="{{ run.event_seq }}"
+  data-revision="{{ run.revision }}" data-pending-id="{{ card.pending_id if card else '' }}"
+  aria-label="Waiting for you">
+  {% include "_pending.html" %}
+</section>

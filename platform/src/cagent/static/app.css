@@ -19,3 +19,11 @@ table.runs th, table.runs td { text-align: left; padding: .35rem .5rem; border-b
 .state-healthy { color: var(--ok); } .state-reconcile, .state-escalated { color: var(--warn); }
 .htmx-indicator { opacity: 0; } .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
 pre { overflow-x: auto; background: #f5f5f7; padding: .6rem; border-radius: 6px; }
+section { margin: 1.2rem 0; }
+.note { color: var(--muted); }
+.warn { color: var(--warn); }
+.runner.offline { color: var(--bad); }
+.phase, .runner { margin-left: .6rem; font-size: .9em; }
+table.services { border-collapse: collapse; width: 100%; }
+table.services td, table.services th { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid var(--line); }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: .8rem 1rem; }

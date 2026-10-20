@@ -1,0 +1,25 @@
+<p>
+  <span class="state state-{{ run.state }}">{{ run.state }}</span>
+  {% if run.phase %}<span class="phase">phase: {{ run.phase }}</span>{% endif %}
+  <span class="runner {{ 'online' if run.runner_status.online else 'offline' }}">
+    Runner {{ run.runner }} is {{ "online" if run.runner_status.online else "offline" }}
+    {%- if run.runner_status.changed_at %} since {{ run.runner_status.changed_at | when }}{% endif %}
+  </span>
+</p>
+{% if run.state == "healthy" %}
+<p>Passed acceptance at {{ run.verified_at | when }}. Nothing watches this cluster afterwards.</p>
+{% elif run.state == "reconcile" and run.reconcile %}
+<p class="warn">The last execution ended without a known result: {{ run.reconcile.reason }}
+  {%- if run.reconcile.last_phase %} (last phase: {{ run.reconcile.last_phase }}){% endif %}.</p>
+{% endif %}
+{% if run.state in ("healthy", "rejected", "escalated", "abandoned") %}
+<div class="cleanup">
+  {% if run.cluster_state and (run.cluster_state.other_active_run or run.cluster_state.marked) %}
+  <p class="note">This cluster has another active run or unconfirmed operations, so no cleanup is suggested here.</p>
+  {% else %}
+  <p>To remove the cluster, run this on the machine of Runner <b>{{ run.runner }}</b>, with the same Docker:</p>
+  <pre>cagent-runner down -name {{ run.cluster }}</pre>
+  <p class="warn">It deletes the cluster's current containers, networks, and volumes, whichever run made them. Data in volumes is lost.</p>
+  {% endif %}
+</div>
+{% endif %}

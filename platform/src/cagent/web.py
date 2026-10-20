@@ -24,6 +24,7 @@ from jinja2 import Environment, PackageLoader, StrictUndefined
 
 from cagent.access import PRE_COOKIE, SESSION_COOKIE, Access, Denied
 from cagent.auth import LoginError, RateLimited
+from cagent.record import mask_published
 from cagent.runs import RunError, RunService
 
 STATIC = Path(__file__).parent / "static"
@@ -69,6 +70,24 @@ templates.filters["when"] = lambda t: (
 def render(name: str, status: int = 200, **context: Any) -> HTMLResponse:
     html = templates.get_template(name).render(htmx_config=json.dumps(HTMX_CONFIG), **context)
     return HTMLResponse(html, status_code=status)
+
+
+def card(pending: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A pending item as the page shows it: masked like the record, so a secret default
+    never reaches the HTML; has_default says whether "use the default" can be offered."""
+    if pending is None:
+        return None
+    payload = pending["payload"]
+    return {
+        **pending,
+        "payload": mask_published(pending["kind"], payload),
+        "has_default": payload.get("default") is not None,
+    }
+
+
+def regions(run: dict[str, Any]) -> dict[str, Any]:
+    """Template context for the status, summary, and pending regions of one snapshot."""
+    return {"run": run, "card": card(run["pending"])}
 
 
 async def form(request: Request) -> dict[str, list[str]]:
@@ -182,6 +201,29 @@ def install(app: FastAPI, service: RunService, access: Access) -> None:
             runners=await service.runners(s.user),
             command_id=uuid.uuid4().hex,  # a retry of this form reuses it
         )
+
+    # after /runs/new, so "new" is never taken for a run id
+    @app.get("/runs/{run_id}")
+    async def run_page(request: Request, run_id: str) -> Response:
+        s = page_session(request)
+        if s is None:
+            return RedirectResponse("/login", status_code=303)
+        try:
+            run = await service.snapshot(s.user, run_id)
+        except RunError:
+            return render("not_found.html", 404, user=s.user, csrf=s.csrf)
+        return render("run.html", user=s.user, csrf=s.csrf, **regions(run))
+
+    @app.get("/runs/{run_id}/fragments/state")
+    async def state_fragment(request: Request, run_id: str) -> Response:
+        """Status, summary, and pending regions from one read, with the seq they reflect.
+        The page asks for it by itself, so it does not count as use of the session."""
+        s = access.require(request)
+        run = await service.snapshot(s.user, run_id)
+        response = render("state.html", **regions(run))
+        response.headers["Cagent-Event-Seq"] = str(run["event_seq"])
+        response.headers["Cagent-Revision"] = str(run["revision"])
+        return response
 
     @app.post("/runs")
     async def create_run(request: Request) -> Response:

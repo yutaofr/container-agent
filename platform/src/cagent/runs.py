@@ -346,11 +346,24 @@ class RunService:
         """Everything a page shows about a run, read in one transaction."""
         async with self.store.read() as t:
             run = self._visible(user, await t.get_run(run_id))
-            runner = await t.one("SELECT * FROM runner_status WHERE runner = ?", run["runner"])
-        return self._view(run, runner)
+            return await self._snapshot_in(t, run)
 
     @staticmethod
-    def _view(run: dict[str, Any], runner: dict[str, Any] | None) -> dict[str, Any]:
+    async def _cluster_view(t, run: dict[str, Any]) -> dict[str, Any]:
+        """What the page needs to know about the run's cluster beyond this run."""
+        row = await t.get_cluster(run["runner"], run["cluster"])
+        other = None
+        if row and row["lock_run_id"] and row["lock_run_id"] != run["id"]:
+            holder = await t.get_run(row["lock_run_id"])
+            other = holder["id"] if holder and holder["state"] in ACTIVE_STATES else None
+        return {"other_active_run": other, "marked": bool(row and row["marks"])}
+
+    @staticmethod
+    def _view(
+        run: dict[str, Any],
+        runner: dict[str, Any] | None,
+        cluster: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         pending = run["pending"]
         return {
             "id": run["id"],
@@ -385,6 +398,7 @@ class RunService:
             "min_event_seq": run["min_event_seq"],
             "events_pruned_through": run["events_pruned_through_seq"],
             "history": run["history"],
+            "cluster_state": cluster,
         }
 
     async def record(
@@ -501,7 +515,7 @@ class RunService:
 
     async def _snapshot_in(self, t, run: dict[str, Any]) -> dict[str, Any]:
         runner = await t.one("SELECT * FROM runner_status WHERE runner = ?", run["runner"])
-        return self._view(run, runner)
+        return self._view(run, runner, await self._cluster_view(t, run))
 
     # --- commands on a run ------------------------------------------------------------------
 
