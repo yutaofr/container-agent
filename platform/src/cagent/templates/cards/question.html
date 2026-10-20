@@ -1,0 +1,24 @@
+{% set p = card.payload %}
+<h2>Question</h2>
+<p>{{ p.question }}</p>
+{% if p.error and p.error is not mapping %}<p class="error">{{ p.error }}</p>{% endif %}
+{% if p.options and p.options[0] is not mapping %}
+<fieldset>
+  {% for option in p.options %}
+  <label><input type="radio" name="answer" value="{{ option }}"{% if loop.first %} checked{% endif %}> {{ option }}</label>
+  {% endfor %}
+</fieldset>
+{% else %}
+<label>Answer
+  <input name="answer" autocomplete="off"
+    {%- if p.gap and p.gap.kind == "missing_env" %} type="password"{% endif %}>
+</label>
+{% endif %}
+<div class="actions">
+  <button type="submit" name="choice" value="answer">Answer</button>
+  {% if card.has_default %}
+  <button type="submit" name="choice" value="default">
+    {%- if p.default is mapping %}Use the default (hidden){% else %}Use the default ({{ p.default }}){% endif %}</button>
+  {% endif %}
+  <button type="submit" name="choice" value="abort">Abort the run</button>
+</div>

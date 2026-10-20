@@ -477,6 +477,23 @@ class RunService:
             "history": run["history"],
         }
 
+    async def published_file(
+        self, user: str, run_id: str, pending_id: str, index: int
+    ) -> tuple[str, str]:
+        """(path, content) of file index in a save_descriptors item, as it was published."""
+        async with self.store.read() as t:
+            self._visible(user, await t.get_run(run_id))
+            row = await t.one(
+                "SELECT * FROM pendings WHERE run_id = ? AND pending_id = ?"
+                " AND record_type = 'published' AND kind = 'save_descriptors'",
+                run_id,
+                pending_id,
+            )
+        files = sorted(((row or {}).get("payload") or {}).get("files", {}).items())
+        if not 0 <= index < len(files):
+            raise not_found()
+        return files[index]
+
     async def runners(self, user: str) -> list[dict[str, Any]]:
         """The user's Runners with their stored status."""
         names = sorted(self.users.get(user, set()))

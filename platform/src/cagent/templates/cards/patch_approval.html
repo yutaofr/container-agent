@@ -1,0 +1,32 @@
+{% set p = card.payload %}
+<h2>Approve a model's patch</h2>
+<p>Proposed by the <b>{{ p.tier }}</b> tier for <code>{{ p.signature }}</code>.</p>
+<p class="untrusted">Root cause, as the model states it (not verified): {{ p.root_cause }}</p>
+<p>Why it needs your approval:</p>
+<ul>{% for r in p.reasons %}<li>{{ r }}</li>{% endfor %}</ul>
+{% if p.preview is none %}
+<p class="error">The patch does not apply to the current compose file, so its effect cannot be shown. It cannot be approved.</p>
+{% else %}
+<table class="preview">
+  <thead><tr><th>Step</th><th>Path</th><th>Before</th><th>After</th></tr></thead>
+  <tbody>
+  {% for step in p.preview %}
+  <tr>
+    <td>{{ "check" if step.op == "test" else ("insert" if step.insert else step.op) }}</td>
+    <td><code>{{ step.path }}</code></td>
+    <td>{% if step.before.present %}<code>{{ step.before.value | json_value }}</code>{% else %}(absent){% endif %}</td>
+    <td>{% if step.after.present %}<code>{{ step.after.value | json_value }}</code>{% else %}(absent){% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% if p.evidence %}
+<details><summary>Evidence the model saw (received {{ p.evidence.received_at | when }})</summary>
+  <ul>{% for svc in p.evidence.services %}<li>{{ svc.service }}: {{ svc.state }}{% if svc.errors %}<pre>{{ svc.errors | join("\n") }}</pre>{% endif %}</li>{% endfor %}</ul>
+</details>
+{% endif %}
+<div class="actions">
+  <button type="submit" name="choice" value="approve"{% if p.preview is none %} disabled{% endif %}>Approve patch</button>
+  <button type="submit" name="choice" value="reject">Reject patch (escalates)</button>
+</div>
