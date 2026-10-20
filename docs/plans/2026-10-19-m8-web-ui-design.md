@@ -29,7 +29,7 @@ M8 is done only when M8b is done. M8b's detailed plan is written after M8a merge
 | **A reconciled run continues only after a new recovery approval** (user decision) | A workdir build runs the project's build command before the image cache is checked, and init scripts run before their marker is written. A matching compose fingerprint proves neither safe to repeat. |
 | **No "destroy cluster" in M8** (user decision) | `down` runs `docker compose down -v` and deletes volumes; the platform cannot yet preview exactly what it deletes, lock it per cluster, or confirm a timed-out deletion. The page shows the local `cagent-runner down` command and warns that it deletes volumes. |
 | **Runner serial execution and `status` belong to M8a** (user decision) | Today each connection has its own worker and subcommands run on `context.Background()`, so after a reconnect an old call (and its queue) keeps running beside new calls. Without a Runner change the platform cannot know that an old operation has stopped. |
-| **One process, one worker** | The hub's connections and the background executions live in process memory. Several web workers would scatter them. M9's Postgres move must verify multi-worker coordination separately. |
+| **One process, one worker** | The hub's connections and the background executions live in process memory. Several web workers would scatter them. M9's Postgres move must verify multi-worker coordination separately. (2026-10-20: the POC keeps SQLite; see the [M9a design](2026-10-20-m9a-scenarios-eval-design.md).) |
 | **HTTP never touches LangGraph** | Routes call `RunService`; templates make no business decisions. A later React UI could keep `RunService`, the approval rules, and the view model. |
 
 ## 3. Architecture
@@ -346,4 +346,4 @@ Errors are `{error, detail?, snapshot?}`: `401 login_required`, `401 login_faile
 - Ongoing watch after `healthy` (design phase 10).
 - Cancelling Runner process trees and exactly-once external operations.
 - An arbitrary YAML editor in the approval view: there is no edit command or approval invalidation protocol for it.
-- Postgres, multiple workers, and SSO (M9 and later).
+- Postgres, multiple workers, and SSO (M9 and later). (2026-10-20: not in the POC; see the [M9a design](2026-10-20-m9a-scenarios-eval-design.md).)

@@ -53,7 +53,7 @@ flowchart LR
   subgraph PLATFORM["Internal platform · Python"]
     UI["Web UI<br/>chat · approval · status · logs"]
     ORC["Orchestrator<br/>LangGraph state machine"]
-    PG[("Postgres<br/>checkpoints · audit")]
+    PG[("Store<br/>checkpoints · audit<br/>SQLite in the POC")]
     GW["Model Gateway<br/>LiteLLM"]
     CAT["Catalog Service<br/>descriptors · templates · recipes"]
     HUB["Runner Hub<br/>connections · tool RPC"]
@@ -94,7 +94,7 @@ flowchart LR
 ### 3.1 Platform (Python)
 
 - **Web UI**: chat, YAML diff approval, cluster status panel, live logs.
-- **Orchestrator**: a LangGraph state machine, one run per cluster task. A Postgres checkpointer persists state, so a run survives a platform restart or a closed browser tab. Approval waits sit at LangGraph interrupts.
+- **Orchestrator**: a LangGraph state machine, one run per cluster task. A checkpointer persists state, so a run survives a platform restart or a closed browser tab. The POC stores checkpoints and run records in SQLite and runs one process with one worker (M8a); central storage such as Postgres is a later migration that needs its own design for the store, checkpoints, execution ownership, and recovery ([M9a design](2026-10-20-m9a-scenarios-eval-design.md)). Approval waits sit at LangGraph interrupts.
 - **Model Gateway**: LiteLLM in front of Bedrock and self-hosted models. It handles routing, usage, and cost accounting.
 - **Catalog Service**: collects each repository's `.cagent/service.yaml`, maintains middleware templates, and stores shared recipes.
 - **Runner Hub**: holds the Runners' WebSocket connections and turns tool calls into RPCs to the right Runner.
@@ -265,9 +265,9 @@ Strip timestamps, container IDs, IPs, port numbers, and similar variables, then 
 
 | Tier | Handling | Typical problems |
 |---|---|---|
-| T0 rules | Deterministic fix, no LLM | Host port conflict, exit code 137, dependency not ready (add `depends_on: service_healthy`), image architecture mismatch |
+| T0 rules | Deterministic fix, no LLM | Host port conflict, exit code 137, image architecture mismatch; the start order of declared dependencies comes from the generator's `depends_on: service_healthy`, which does not cover a weak healthcheck, a schema not yet ready, or a dependency lost later |
 | T1 small model | Problems inside one service | Missing environment variable, wrong config field |
-| T2 large model | Cross-service root causes, unseen errors | Kafka `advertised.listeners`, cross-service auth chains |
+| T2 large model | Cross-service root causes, unseen errors | Kafka `advertised.listeners`; cross-service auth chains for diagnosis only, since prompts mask credentials and no model can repair what it cannot see (M9a tests that such failures escalate) |
 
 Fix in dependency order, upstream first. While an upstream service is unhealthy, treat downstream connection errors as symptoms.
 
@@ -630,9 +630,9 @@ flowchart LR
 | Layer | Scope | Method |
 |---|---|---|
 | Unit | Runner: compose-go validation, whitelist, redaction, fingerprinting. Platform: ClusterSpec → compose generation, complexity scoring, budgets and oscillation detection | Go table-driven tests; golden files for generators |
-| LLM nodes | Output structure and decisions of clarify, generate, diagnose | Record/replay in CI; nightly run against live models |
-| Fault-scenario library | Prebuilt broken clusters: port conflict, OOM, missing env var, MySQL not ready, misconfigured Kafka listeners, architecture mismatch, config typos, and more. Each scenario records its root-cause category and maximum rounds | Run every scenario on every tier; track fix rate, rounds, and cost; tune default routing from the results |
-| End-to-end | The agent deploys its own platform, plus 2–3 real company projects | Nightly |
+| LLM nodes | Output structure and decisions of clarify, generate, diagnose | Scripted model answers in CI, including dangerous and invalid ones; live models locally. Record/replay and nightly live runs are later work |
+| Fault-scenario library | Broken clusters with faults injected before generation (spec, scenario catalog layer, fixtures, host preconditions): port conflict, OOM, Java heap, architecture mismatch, slow start, config typos, misconfigured Kafka listeners, and safety cases that must escalate. Each scenario has a healthy baseline, injection evidence, its root-cause category, and an acceptance round limit. Single-root-cause scenarios are scored; a few combinations run as regressions ([M9a design](2026-10-20-m9a-scenarios-eval-design.md)) | Acceptance with default routing, three runs per scenario; tier comparison once per tier; fix rate, rounds, duration, and the diagnostic chain per run |
+| End-to-end | The agent deploys its own platform (M9b), plus 2 real company projects (M9c) | Manual on the target machine; nightly runs are later work |
 
 ## 10. POC Scope
 
@@ -665,6 +665,6 @@ The POC reads descriptors from a local catalog directory instead of collecting t
 
 **Success criteria:**
 
-- At least 80% of fault scenarios fixed automatically within budget
+- A mean scenario repair rate R ≥ 80 % on the frozen repair set: R = (1/N) Σ sᵢ/3, where sᵢ counts the successful runs of scenario i out of three with default routing and formal settings. The stable pass rate (scenarios at 3/3) is reported beside it. Every formal run, of every kind, passes its safety assertions, and combined scenarios show no safety violation ([M9a design](2026-10-20-m9a-scenarios-eval-design.md), section 7)
 - 2 real projects running end to end
 - Registered projects go from prompt to healthy cluster in under 15 minutes
