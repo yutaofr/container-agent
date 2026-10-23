@@ -1,0 +1,24 @@
+# R8: the session service points at a misspelled cache host. Fixing it needs the other
+# services in view. The check writes a key and reads it back through the cache.
+id: cache-host-typo
+kind: repair
+category: cross-service
+spec:
+  purpose: a web app that keeps sessions in a cache
+  middleware:
+    - {template: sessionweb-b, name: sessions}
+    - {template: redis}
+baseline:
+  spec_patch:
+    - {op: replace, path: /middleware/0/template, value: sessionweb}
+expect:
+  config:
+    - {pointer: /services/sessions/environment/CACHE_HOST, equals: rediss}
+  runtime:
+    - {service: sessions, line: "cannot reach cache at rediss"}
+  outcome: healthy
+  accept_rounds: 3
+  after:
+    - {pointer: /services/sessions/environment/CACHE_HOST, equals: redis}
+  checks:
+    - {service: sessions, http: {port: 8080, path: /cgi-bin/session, expect: 200}}

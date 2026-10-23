@@ -1,0 +1,19 @@
+# Serves HTTP on the port HTTP_PORT names, and refuses to start without one (busybox httpd
+# alone would fall back to port 80 silently).
+name: portweb
+kind: middleware
+provides: { capability: portweb }
+image: "busybox:{version}"
+command:
+  - sh
+  - -c
+  - '[ -n "$HTTP_PORT" ] || { echo "FATAL: HTTP_PORT is empty"; exit 1; }; mkdir -p /www && echo ok > /www/index.html && exec httpd -f -p "$HTTP_PORT" -h /www'
+versions: ["1.37"]
+default_version: "1.37"
+port: 8080
+env:
+  HTTP_PORT: "8080"
+healthcheck:
+  cmd: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+presets:
+  tiny: { mem_limit: 64m, cpus: 0.25 }

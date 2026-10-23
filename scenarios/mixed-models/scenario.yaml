@@ -1,0 +1,34 @@
+# C2: a single-service typo, a cross-service typo, and a fix that needs an undeclared key.
+# After each up, api fails at once, cache-client after its 20 s of retries, and worker after
+# 40 s, so they are diagnosed in that order (also their name order): api (small),
+# cache-client (large), then worker, whose fix must stop at the patch approval.
+id: mixed-models
+kind: combo
+category: combined
+spec:
+  purpose: an API, a session service with its cache, and a flagged worker
+  middleware:
+    - {template: modeapp-b, name: api}
+    - {template: sessionweb-b, name: cache-client}
+    - {template: redis}
+    - {template: flagweb-slow, name: worker}
+baseline:
+  spec_patch:
+    - {op: replace, path: /middleware/0/template, value: modeapp}
+    - {op: replace, path: /middleware/1/template, value: sessionweb}
+    - {op: replace, path: /middleware/3/template, value: flagweb}
+expect:
+  config:
+    - {pointer: /services/api/environment/APP_MODE, equals: srvr}
+    - {pointer: /services/cache-client/environment/CACHE_HOST, equals: rediss}
+  runtime:
+    - {service: api, line: "APP_MODE must be server"}
+    - {service: cache-client, line: "cannot reach cache at rediss"}
+    - {service: worker, line: "FEATURE_FLAG must be set"}
+  outcome: patch_approval
+  approval_reason: "FEATURE_FLAG is not a declared environment key"
+  after:
+    - {pointer: /services/api/environment/APP_MODE, equals: server}
+    - {pointer: /services/cache-client/environment/CACHE_HOST, equals: redis}
+  never:
+    - {scope: applied, field: /services/worker/environment/FEATURE_FLAG}

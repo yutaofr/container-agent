@@ -1,0 +1,19 @@
+# mixed-models: flagweb-b that first spends 40 s loading its configuration, so it fails
+# after the session service (which retries its cache for 20 s) and is diagnosed last.
+name: flagweb-slow
+kind: middleware
+provides: { capability: flagweb }
+image: "busybox:{version}"
+command:
+  - sh
+  - -c
+  - 'sleep 40; [ "$FEATURE_FLAG" = on ] || { echo "FATAL: FEATURE_FLAG must be set to on"; exit 1; }; mkdir -p /www && echo ok > /www/index.html && exec httpd -f -p 8080 -h /www'
+versions: ["1.37"]
+default_version: "1.37"
+port: 8080
+env:
+  LOG_LEVEL: info
+healthcheck:
+  cmd: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+presets:
+  tiny: { mem_limit: 64m, cpus: 0.25 }

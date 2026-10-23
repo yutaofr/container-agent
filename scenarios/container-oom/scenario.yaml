@@ -1,0 +1,23 @@
+# R2: the service needs about 160 MB, but its preset gives it 64m, so the kernel kills it.
+# T0's oom_killed rule raises mem_limit until it fits.
+id: container-oom
+kind: repair
+category: resource
+spec:
+  purpose: a web service that keeps a large table in memory
+  middleware:
+    - {template: memhog, preset: tiny}
+baseline:
+  spec_patch:
+    - {op: replace, path: /middleware/0/preset, value: roomy}
+expect:
+  config:
+    - {pointer: /services/memhog/mem_limit, equals: 64m}
+  runtime:
+    - {signature: "oom:killed@memhog"}
+  outcome: healthy
+  accept_rounds: 3
+  after:
+    - {pointer: /services/memhog/mem_limit, not_equals: 64m}
+  checks:
+    - {service: memhog, http: {port: 8080, path: /, expect: 200}}

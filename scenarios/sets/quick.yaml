@@ -1,0 +1,2 @@
+purpose: regression without JVM, MySQL, or Kafka; reported by kind
+scenarios: [port-occupied, container-oom, config-value-typo, required-env-empty, cache-host-typo, cache-port-wrong, undeclared-key, needs-image, port-and-oom, mixed-models]

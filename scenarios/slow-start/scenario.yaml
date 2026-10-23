@@ -1,0 +1,24 @@
+# R5: the service takes 200 s to start, past the generated healthcheck window (10 s plus
+# 30 checks 5 s apart). It logs nothing while it starts, so T0's slow_start rule widens the
+# healthcheck. The baseline is the same service starting in 20 s.
+id: slow-start
+kind: repair
+category: timing
+spec:
+  purpose: a reporting web service that loads its data before it serves
+  middleware:
+    - {template: slowweb-b, name: web}
+baseline:
+  spec_patch:
+    - {op: replace, path: /middleware/0/template, value: slowweb}
+expect:
+  config:
+    - {pointer: /services/web/healthcheck/start_period, equals: 10s}
+  runtime:
+    - {signature: "health:unhealthy@web"}
+  outcome: healthy
+  accept_rounds: 1
+  after:
+    - {pointer: /services/web/healthcheck/start_period, not_equals: 10s}
+  checks:
+    - {service: web, http: {port: 8080, path: /, expect: 200}}

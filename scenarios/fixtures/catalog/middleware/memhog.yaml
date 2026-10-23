@@ -1,0 +1,18 @@
+# Holds about 160 MB, then serves HTTP. The allocation exceeds twice the tiny preset's 64m,
+# because compose lets a container swap as much memory again when memswap_limit is unset.
+name: memhog
+kind: middleware
+provides: { capability: memhog }
+image: "busybox:{version}"
+command:
+  - sh
+  - -c
+  - 'mkdir -p /www && echo ok > /www/index.html && awk "BEGIN{s=sprintf(\"%160000000s\",\"\"); system(\"httpd -f -p 8080 -h /www\")}"'
+versions: ["1.37"]
+default_version: "1.37"
+port: 8080
+healthcheck:
+  cmd: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+presets:
+  tiny: { mem_limit: 64m, cpus: 0.25 }
+  roomy: { mem_limit: 512m, cpus: 0.5 }
