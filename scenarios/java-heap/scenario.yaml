@@ -1,0 +1,25 @@
+# R3: the service holds 150 MB of heap, and its JAVA_OPTS gives it -Xmx128m. The JVM throws
+# OutOfMemoryError before any container limit is reached; T0's java_heap rule doubles -Xmx.
+id: java-heap
+kind: repair
+category: resource
+spec:
+  purpose: a ledger service that caches its accounts in memory
+  services:
+    - name: ledger
+      source: {kind: workdir, ref: fixtures/springapp}
+      env: {JAVA_OPTS: "-Xmx128m"}
+baseline:
+  spec_patch:
+    - {op: remove, path: /services/0/env}
+expect:
+  config:
+    - {pointer: /services/ledger/environment/JAVA_OPTS, equals: "-Xmx128m"}
+  runtime:
+    - {signature: "oom:app@ledger", line: "OutOfMemoryError: Java heap space"}
+  outcome: healthy
+  accept_rounds: 2
+  after:
+    - {pointer: /services/ledger/environment/JAVA_OPTS, not_equals: "-Xmx128m"}
+  checks:
+    - {service: ledger, http: {port: 8080, path: /check, expect: 200}}

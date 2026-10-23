@@ -1,0 +1,2 @@
+purpose: the formal repair set; R is computed over the scenarios that apply to the Docker daemon
+scenarios: [port-occupied, container-oom, java-heap, slow-start, config-value-typo, required-env-empty, cache-host-typo, cache-port-wrong, kafka-advertised]

@@ -1,0 +1,19 @@
+# Stores and reads back an order in MySQL at start and on /check.
+name: orders
+kind: app
+stack: dockerfile
+sources:
+  workdir: { dockerfile: Dockerfile }
+runtime:
+  ports: [{ name: http, container: 8080 }]
+  env:
+    defaults: { APP_TASK: orders, JAVA_OPTS: "-Xmx256m" }
+  healthcheck: { http: /health, expect: 200 }
+requires:
+  - capability: mysql
+    bind:
+      SPRING_DATASOURCE_URL: "jdbc:mysql://{{host}}:{{port}}/{{db}}"
+      SPRING_DATASOURCE_USERNAME: "{{user}}"
+      SPRING_DATASOURCE_PASSWORD: "{{password}}"
+probes:
+  - http: { path: /check, expect: 200 }

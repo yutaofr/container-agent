@@ -1,0 +1,26 @@
+# R10: the broker advertises localhost:9092. The service bootstraps through kafka:9092, then
+# tries its own localhost and fails. The check produces and consumes a uniquely keyed event.
+id: kafka-advertised
+kind: repair
+category: cross-service
+spec:
+  purpose: an event service that publishes and reads its own events through Kafka
+  services:
+    - name: events
+      source: {kind: workdir, ref: fixtures/springapp}
+  middleware:
+    - {template: kafka-b, name: kafka}
+baseline:
+  spec_patch:
+    - {op: replace, path: /middleware/0/template, value: kafka}
+expect:
+  config:
+    - {pointer: /services/kafka/environment/KAFKA_ADVERTISED_LISTENERS, equals: "PLAINTEXT://localhost:9092"}
+  runtime:
+    - {service: events, line: "TimeoutException"}
+  outcome: healthy
+  accept_rounds: 3
+  after:
+    - {pointer: /services/kafka/environment/KAFKA_ADVERTISED_LISTENERS, equals: "PLAINTEXT://kafka:9092"}
+  checks:
+    - {service: events, http: {port: 8080, path: /check, expect: 200}}
