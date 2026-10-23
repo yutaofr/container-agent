@@ -35,22 +35,20 @@ class Station(Protocol):
 
 
 async def kill_group(pgid: int, timeout_s: float = 10.0) -> bool:
-    """SIGKILL a process group; True once no process of it is left."""
+    """SIGKILL a process group; True once no live process of it is left.
+
+    Zombies are dead and can act no more, but how signal 0 treats them differs: Linux
+    reports them as present until they are reaped, macOS answers EPERM. So the check lists
+    the group's live (non-zombie) members instead of trusting the signal."""
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
         return True
     except PermissionError:
-        pass  # macOS: only zombies are left (see below); confirm by polling as usual
+        pass  # macOS: only zombies are left; the poll below confirms it
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            # macOS answers EPERM when only zombies are left: a live process of ours would
-            # accept signal 0, so nothing in the group can act any more.
+        if not group_members(pgid):
             return True
         await asyncio.sleep(0.1)
     return False
