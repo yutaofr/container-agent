@@ -1,0 +1,13 @@
+# The billing service built with the correct calculator: code-bug's healthy baseline.
+name: billing-ok
+kind: app
+stack: dockerfile
+sources:
+  workdir: { dockerfile: Dockerfile }
+runtime:
+  ports: [{ name: http, container: 8080 }]
+  env:
+    defaults: { APP_TASK: billing, BILLING_ENABLED: "true", JAVA_OPTS: "-Xmx256m" }
+  healthcheck: { http: /health, expect: 200 }
+probes:
+  - http: { path: /check, expect: 200 }

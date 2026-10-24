@@ -1,0 +1,14 @@
+# Computes an invoice at start and on /check, built with the defective calculator.
+# BILLING_ENABLED=false skips the start-up invoice, but /check still computes one.
+name: billing
+kind: app
+stack: dockerfile
+sources:
+  workdir: { dockerfile: bug.Dockerfile }
+runtime:
+  ports: [{ name: http, container: 8080 }]
+  env:
+    defaults: { APP_TASK: billing, BILLING_ENABLED: "true", JAVA_OPTS: "-Xmx256m" }
+  healthcheck: { http: /health, expect: 200 }
+probes:
+  - http: { path: /check, expect: 200 }

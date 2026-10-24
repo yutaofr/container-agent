@@ -1,0 +1,2 @@
+purpose: one light, one JVM, one Kafka, and one slow-start scenario, timed to estimate the formal matrix
+scenarios: [cache-host-typo, java-heap, kafka-advertised, slow-start]

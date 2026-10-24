@@ -1,0 +1,16 @@
+# Produces a uniquely keyed event to Kafka and consumes it back, at start and on /check.
+name: events
+kind: app
+stack: dockerfile
+sources:
+  workdir: { dockerfile: Dockerfile }
+runtime:
+  ports: [{ name: http, container: 8080 }]
+  env:
+    defaults: { APP_TASK: events, JAVA_OPTS: "-Xmx256m" }
+  healthcheck: { http: /health, expect: 200 }
+requires:
+  - capability: kafka
+    bind: { SPRING_KAFKA_BOOTSTRAP_SERVERS: "{{host}}:{{port}}" }
+probes:
+  - http: { path: /check, expect: 200 }

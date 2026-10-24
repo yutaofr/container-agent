@@ -1,0 +1,24 @@
+# R1: the host port the cache should publish is already taken. T0's port_conflict rule moves
+# it; the harness holds the port for the whole attempt, so the fault cannot go away by itself.
+id: port-occupied
+kind: repair
+category: port
+spec:
+  purpose: a cache that developers reach on a published host port
+  middleware:
+    - {template: redis, publish: "${taken}"}
+host:
+  - occupied_port: {as: taken}
+baseline:
+  spec_patch: []
+expect:
+  config:
+    - {pointer: /services/redis/ports, publishes: "${taken}"}
+  runtime:
+    - {signature: "port:conflict@redis"}
+  outcome: healthy
+  accept_rounds: 1
+  after:
+    - {pointer: /services/redis/ports, not_publishes: "${taken}"}
+  checks:
+    - {service: redis, tcp: {port: 6379}}

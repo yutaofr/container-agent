@@ -1,0 +1,22 @@
+# R6: one service's own setting is misspelled; the log names the valid value.
+id: config-value-typo
+kind: repair
+category: config
+spec:
+  purpose: an API service
+  middleware:
+    - {template: modeapp-b, name: api}
+baseline:
+  spec_patch:
+    - {op: replace, path: /middleware/0/template, value: modeapp}
+expect:
+  config:
+    - {pointer: /services/api/environment/APP_MODE, equals: srvr}
+  runtime:
+    - {service: api, line: "APP_MODE must be server"}
+  outcome: healthy
+  accept_rounds: 3
+  after:
+    - {pointer: /services/api/environment/APP_MODE, equals: server}
+  checks:
+    - {service: api, http: {port: 8080, path: /, expect: 200}}

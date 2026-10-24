@@ -1,0 +1,13 @@
+# Holds 150 MB of heap from the start; java-heap gives it -Xmx128m.
+name: ledger
+kind: app
+stack: dockerfile
+sources:
+  workdir: { dockerfile: Dockerfile }
+runtime:
+  ports: [{ name: http, container: 8080 }]
+  env:
+    defaults: { APP_TASK: heap, JAVA_OPTS: "-Xmx512m" }
+  healthcheck: { http: /health, expect: 200 }
+probes:
+  - http: { path: /check, expect: 200 }

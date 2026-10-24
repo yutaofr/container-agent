@@ -1,0 +1,16 @@
+# Takes 20 s to start, well inside the generated healthcheck window.
+name: slowweb
+kind: middleware
+provides: { capability: slowweb }
+image: "busybox:{version}"
+command:
+  - sh
+  - -c
+  - 'sleep 20; mkdir -p /www && echo ok > /www/index.html && exec httpd -f -p 8080 -h /www'
+versions: ["1.37"]
+default_version: "1.37"
+port: 8080
+healthcheck:
+  cmd: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+presets:
+  tiny: { mem_limit: 64m, cpus: 0.25 }

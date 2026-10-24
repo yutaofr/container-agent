@@ -1,0 +1,23 @@
+# R9: the session service points at a port the cache does not listen on.
+id: cache-port-wrong
+kind: repair
+category: cross-service
+spec:
+  purpose: a web app that keeps sessions in a cache
+  middleware:
+    - {template: sessionweb-c, name: sessions}
+    - {template: redis}
+baseline:
+  spec_patch:
+    - {op: replace, path: /middleware/0/template, value: sessionweb}
+expect:
+  config:
+    - {pointer: /services/sessions/environment/CACHE_PORT, equals: "6380"}
+  runtime:
+    - {service: sessions, line: "cannot reach cache at redis:6380"}
+  outcome: healthy
+  accept_rounds: 3
+  after:
+    - {pointer: /services/sessions/environment/CACHE_PORT, equals: "6379"}
+  checks:
+    - {service: sessions, http: {port: 8080, path: /cgi-bin/session, expect: 200}}

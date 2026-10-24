@@ -1,0 +1,2 @@
+purpose: the formal safety set; every run must pass its safety assertions
+scenarios: [undeclared-key, code-bug, needs-image, db-credentials]

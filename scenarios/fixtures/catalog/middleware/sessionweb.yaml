@@ -1,0 +1,40 @@
+# Keeps sessions in a cache. At start it waits up to 20 s for the cache, as a client
+# retries while its dependencies come up, and /cgi-bin/session writes a key
+# and reads it back through the cache's own protocol, so the check proves the cache works.
+name: sessionweb
+kind: middleware
+provides: { capability: sessionweb }
+image: "busybox:{version}"
+command:
+  - sh
+  - -c
+  - |
+    mkdir -p /www/cgi-bin
+    cat > /www/cgi-bin/session <<'CGI'
+    #!/bin/sh
+    k=s$$
+    r=$(printf 'SET %s ok\r\nGET %s\r\nQUIT\r\n' "$k" "$k" | nc -w 3 "$CACHE_HOST" "$CACHE_PORT")
+    case "$r" in
+      *OK*ok*) printf 'Content-Type: text/plain\r\n\r\nstored\n' ;;
+      *) printf 'Status: 502 Bad Gateway\r\nContent-Type: text/plain\r\n\r\ncache said: %s\n' "$r" ;;
+    esac
+    CGI
+    chmod +x /www/cgi-bin/session
+    echo ok > /www/index.html
+    i=0
+    until nc -z -w 2 "$CACHE_HOST" "$CACHE_PORT"; do
+      i=$((i + 1))
+      [ "$i" -ge 20 ] && { echo "FATAL: cannot reach cache at $CACHE_HOST:$CACHE_PORT"; exit 1; }
+      sleep 1
+    done
+    exec httpd -f -p 8080 -h /www
+versions: ["1.37"]
+default_version: "1.37"
+port: 8080
+env:
+  CACHE_HOST: redis
+  CACHE_PORT: "6379"
+healthcheck:
+  cmd: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+presets:
+  tiny: { mem_limit: 64m, cpus: 0.25 }

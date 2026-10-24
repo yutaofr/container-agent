@@ -1,0 +1,19 @@
+# Needs FEATURE_FLAG=on, and declares it.
+name: flagweb
+kind: middleware
+provides: { capability: flagweb }
+image: "busybox:{version}"
+command:
+  - sh
+  - -c
+  - '[ "$FEATURE_FLAG" = on ] || { echo "FATAL: FEATURE_FLAG must be set to on"; exit 1; }; mkdir -p /www && echo ok > /www/index.html && exec httpd -f -p 8080 -h /www'
+versions: ["1.37"]
+default_version: "1.37"
+port: 8080
+env:
+  FEATURE_FLAG: "on"
+  LOG_LEVEL: info
+healthcheck:
+  cmd: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+presets:
+  tiny: { mem_limit: 64m, cpus: 0.25 }

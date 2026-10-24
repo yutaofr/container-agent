@@ -1,0 +1,36 @@
+# kafka-advertised: the broker advertises localhost, so clients in other containers reach
+# it for bootstrap but then try their own localhost. A copy of catalog/middleware/kafka.yaml.
+name: kafka-b
+kind: middleware
+provides: { capability: kafka }
+image: "apache/kafka:{version}"
+versions: ["3.9.0", "4.0.0"]
+default_version: "3.9.0"
+port: 9092
+# Single-node KRaft broker. Clients inside the cluster reach it as {{host}}:9092.
+env:
+  KAFKA_NODE_ID: "1"
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+  KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+  KAFKA_HEAP_OPTS: -Xmx256m -Xms256m
+# A TCP probe: kafka-broker-api-versions.sh starts a JVM, which at 0.5 CPU took 2.7-6.6 s, past
+# the 3 s timeout, and spent most of the container's CPU. The open listener is enough: clients,
+# init's kafka-topics.sh among them, retry until the broker answers.
+healthcheck:
+  cmd: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9092'"]
+presets:
+  tiny: { mem_limit: 768m, cpus: 0.5 }
+  standard: { mem_limit: 1536m, cpus: 1.0 }
+# --if-not-exists makes topic creation idempotent; no marker needed. kafka-topics.sh is a JVM.
+init:
+  mem_limit: 512m
+  topics:
+    run: /opt/kafka/bin/kafka-topics.sh --bootstrap-server {{host}}:9092 --create --if-not-exists --topic {{topic}} --partitions {{partitions}} --replication-factor 1

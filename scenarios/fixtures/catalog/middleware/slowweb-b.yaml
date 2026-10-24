@@ -1,0 +1,16 @@
+# slow-start: takes 200 s to start, past the generated window of 10 s + 30 x 5 s.
+name: slowweb-b
+kind: middleware
+provides: { capability: slowweb }
+image: "busybox:{version}"
+command:
+  - sh
+  - -c
+  - 'sleep 200; mkdir -p /www && echo ok > /www/index.html && exec httpd -f -p 8080 -h /www'
+versions: ["1.37"]
+default_version: "1.37"
+port: 8080
+healthcheck:
+  cmd: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+presets:
+  tiny: { mem_limit: 64m, cpus: 0.25 }

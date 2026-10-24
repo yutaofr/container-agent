@@ -1,0 +1,23 @@
+# R7: the declared HTTP_PORT is empty, so the service refuses to start. The right value
+# follows from the service's own port and healthcheck (8080); it is not a secret.
+id: required-env-empty
+kind: repair
+category: config
+spec:
+  purpose: a static web site
+  middleware:
+    - {template: portweb-b, name: site}
+baseline:
+  spec_patch:
+    - {op: replace, path: /middleware/0/template, value: portweb}
+expect:
+  config:
+    - {pointer: /services/site/environment/HTTP_PORT, equals: ""}
+  runtime:
+    - {service: site, line: "HTTP_PORT is empty"}
+  outcome: healthy
+  accept_rounds: 3
+  after:
+    - {pointer: /services/site/environment/HTTP_PORT, equals: "8080"}
+  checks:
+    - {service: site, http: {port: 8080, path: /, expect: 200}}

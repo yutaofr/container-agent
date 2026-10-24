@@ -2,9 +2,9 @@ name: platform
 
 on:
   push:
-    paths: ["platform/**", "catalog/**", "runner/**", ".github/workflows/platform.yml"]
+    paths: ["platform/**", "catalog/**", "runner/**", "scenarios/**", "Makefile", ".github/workflows/platform.yml"]
   pull_request:
-    paths: ["platform/**", "catalog/**", "runner/**", ".github/workflows/platform.yml"]
+    paths: ["platform/**", "catalog/**", "runner/**", "scenarios/**", "Makefile", ".github/workflows/platform.yml"]
 
 jobs:
   test:
@@ -37,3 +37,25 @@ jobs:
         with:
           name: playwright-failures
           path: platform/test-results
+
+  # The fault-scenario regression: the ci-fast scenarios on real Docker with T0 rules only and
+  # formal settings. Not the formal 80 % acceptance, which runs locally with models.
+  eval-fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: runner/go.mod
+      - uses: astral-sh/setup-uv@v6
+      - name: Scenario library
+        run: make eval-lint
+      - name: ci-fast scenarios on real Docker
+        run: make eval-fast
+      - name: Keep the redacted evaluation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-fast
+          path: eval-runs
+          if-no-files-found: warn

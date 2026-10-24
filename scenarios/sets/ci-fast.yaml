@@ -1,0 +1,2 @@
+purpose: CI regression on real Docker with T0 rules only; not the formal acceptance
+scenarios: [port-occupied, container-oom]
