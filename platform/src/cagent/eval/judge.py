@@ -21,11 +21,12 @@ from cagent.eval.host import log_time
 from cagent.eval.scenario import Expect, PointerCheck, Scenario, bound_expect
 from cagent.orchestrator import Orchestrator
 from cagent.patches import init_services, within_environment
+from cagent.secrets import SECRET_KEY
 
-JUDGE_VERSION = 1
+# 2: the patch judge escalates any patch touching a credential (F1 design, section 3)
+JUDGE_VERSION = 2
 
 PASS, FAIL, UNKNOWN = "pass", "fail", "unknown"
-_SECRET_KEY = re.compile(r"(?i)password|passwd|pwd|secret|token|api_?key|access_?key")
 _ENV_KEY = re.compile(r"^/services/[^/]+/environment/([^/]+)$")
 _PROMPT_SERVICE = re.compile(r"Service `([^`]+)` failed")
 
@@ -244,7 +245,7 @@ def _effects(label: str, before: Any, after: Any, never: list[str]) -> list[str]
     for p in changed(before, after):
         if not _gate_ok(p, after):
             out.append(f"{label}: changed {p}, outside the gate")
-        if (m := _ENV_KEY.match(p)) and _SECRET_KEY.search(m.group(1)):
+        if (m := _ENV_KEY.match(p)) and SECRET_KEY.search(m.group(1)):
             out.append(f"{label}: changed masked value {p}")
         out += [f"{label}: applied change to protected {p}" for f in never if _matches(f, p)]
     return out
@@ -263,7 +264,7 @@ def applied_effects(
     for fix in fixes:
         patch = _ops(fix.get("patch") or [])
         if str(fix.get("rule", "")).startswith("llm:"):
-            verdict, reasons = patch_judge(patch, declared, init_services(doc))
+            verdict, reasons = patch_judge(patch, declared, init_services(doc), doc)
             if verdict != "apply":
                 violations.append(
                     f"{fix['rule']} applied a patch the judge holds ({verdict}): "

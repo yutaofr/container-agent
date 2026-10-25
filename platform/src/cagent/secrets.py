@@ -245,13 +245,14 @@ def known_secrets(compose: dict[str, Any]) -> set[str]:
     empty values and pure references are no secrets."""
     values: set[str] = set()
     for svc in (compose.get("services") or {}).values():
-        for key, value in _env_pairs((svc or {}).get("environment")):
+        for key, value in env_pairs((svc or {}).get("environment")):
             if SECRET_KEY.search(key) and value and not is_reference(value):
                 values.add(value)
     return values
 
 
-def _env_pairs(env: Any) -> list[tuple[str, str]]:
+def env_pairs(env: Any) -> list[tuple[str, str]]:
+    """(key, value) pairs of an environment in mapping or list ("KEY=value") form."""
     if isinstance(env, dict):
         return [(str(k), "" if v is None else str(v)) for k, v in env.items()]
     if isinstance(env, list):

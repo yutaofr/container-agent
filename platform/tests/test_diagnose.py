@@ -1,7 +1,9 @@
 import pytest
+from pydantic import ValidationError
 
 from cagent.catalog import load_catalog
 from cagent.diagnose import (
+    PatchOp,
     declared_env,
     is_cross_service,
     judge,
@@ -17,6 +19,19 @@ from .conftest import FIXTURES, REPO_CATALOG, spec_with
 from .fakellm import CONFIG, FakeCompleter
 
 DECLARED = {"web": {"APP_MODE", "JAVA_OPTS"}}
+WEB = {
+    "services": {
+        "web": {
+            "image": "web:1",
+            "mem_limit": "512m",
+            "environment": {"APP_MODE": "a", "JAVA_OPTS": "-Xmx256m", "OLD_KEY": "x"},
+        }
+    }
+}
+
+
+def verdict_of(patch, declared=DECLARED, before=WEB):
+    return judge(patch, declared, frozenset(), before)
 
 
 def op(op, path, value=None):
@@ -57,7 +72,7 @@ def op(op, path, value=None):
     ],
 )
 def test_judge(patch, verdict):
-    assert judge(patch, DECLARED)[0] == verdict
+    assert verdict_of(patch)[0] == verdict
 
 
 JVM_DECLARED = {"web": {"JAVA_OPTS", "JAVA_TOOL_OPTIONS", "KAFKA_HEAP_OPTS", "APP_MODE"}}
@@ -77,7 +92,9 @@ JVM_DECLARED = {"web": {"JAVA_OPTS", "JAVA_TOOL_OPTIONS", "KAFKA_HEAP_OPTS", "AP
     ],
 )
 def test_judge_applies_tuning_options(value):
-    assert judge([op("replace", "/services/web/environment/JAVA_OPTS", value)], JVM_DECLARED) == (
+    assert verdict_of(
+        [op("replace", "/services/web/environment/JAVA_OPTS", value)], JVM_DECLARED
+    ) == (
         "apply",
         [],
     )
@@ -115,8 +132,10 @@ def test_judge_applies_tuning_options(value):
 )
 def test_judge_holds_other_jvm_options_for_approval(value):
     for key in ("JAVA_OPTS", "JAVA_TOOL_OPTIONS", "KAFKA_HEAP_OPTS"):
-        verdict, reasons = judge(
-            [op("replace", f"/services/web/environment/{key}", value)], JVM_DECLARED
+        # add, not replace: WEB holds only JAVA_OPTS, and a replace of a missing key does
+        # not apply
+        verdict, reasons = verdict_of(
+            [op("add", f"/services/web/environment/{key}", value)], JVM_DECLARED
         )
         assert verdict == "approve", (key, value)
         assert any("JVM option" in r for r in reasons), reasons
@@ -131,16 +150,16 @@ def test_judge_holds_other_jvm_options_for_approval(value):
     ],
 )
 def test_judge_reads_jvm_options_in_every_environment_shape(patch):
-    assert judge(patch, JVM_DECLARED)[0] == "approve"
+    assert verdict_of(patch, JVM_DECLARED)[0] == "approve"
 
 
 def test_judge_leaves_ordinary_values_alone():
     patch = [op("replace", "/services/web/environment/APP_MODE", "@home -Xdebug")]
-    assert judge(patch, JVM_DECLARED) == ("apply", [])
+    assert verdict_of(patch, JVM_DECLARED) == ("apply", [])
 
 
 def test_judge_explains_approvals():
-    _, reasons = judge([op("add", "/services/web/environment/FEATURE_FLAG", "on")], DECLARED)
+    _, reasons = verdict_of([op("add", "/services/web/environment/FEATURE_FLAG", "on")], DECLARED)
     assert reasons == ["web: FEATURE_FLAG is not a declared environment key"]
 
 
@@ -309,3 +328,136 @@ async def test_the_root_cause_is_masked_before_anything_uses_it():
     )
     assert proposal.root_cause == "mysql -uroot -p****** fails; ****** is stale"
     assert "long-secret-1" not in fake.calls[0][1]
+
+
+SECRETS_BEFORE = {
+    "services": {
+        "db": {"image": "mysql:8.4", "environment": {"MYSQL_PASSWORD": "app", "MYSQL_USER": "app"}},
+        "app": {
+            "image": "app:1",
+            "command": ["run"],
+            "environment": ["DB_PASSWORD=pw-value", "APP_MODE=a"],
+        },
+    }
+}
+SECRETS_DECLARED = {"db": {"MYSQL_PASSWORD", "MYSQL_USER"}, "app": {"DB_PASSWORD", "APP_MODE"}}
+
+
+def credentials_of(patch, before=SECRETS_BEFORE):
+    return judge(patch, SECRETS_DECLARED, frozenset(), before)
+
+
+@pytest.mark.parametrize(
+    "patch, fields",
+    [
+        ([op("replace", "/services/db/environment/MYSQL_PASSWORD", "x")], ["db: MYSQL_PASSWORD"]),
+        ([op("remove", "/services/db/environment/MYSQL_PASSWORD")], ["db: MYSQL_PASSWORD"]),
+        ([op("add", "/services/db/environment/ROOT_PASSWORD", "x")], ["db: ROOT_PASSWORD"]),
+        # list entries: the old key and the new key both count
+        ([op("replace", "/services/app/environment/0", "APP_MODE=test")], ["app: DB_PASSWORD"]),
+        ([op("replace", "/services/app/environment/1", "API_TOKEN=x")], ["app: API_TOKEN"]),
+        ([op("remove", "/services/app/environment/0")], ["app: DB_PASSWORD"]),
+        ([op("add", "/services/app/environment/-", "X_SECRET=1")], ["app: X_SECRET"]),
+        # a list-form entry written into a mapping still names its key
+        ([op("add", "/services/db/environment/0", "TOKEN=x")], ["db: TOKEN"]),
+        # the whole environment, when the old or the new one holds a secret key
+        (
+            [op("replace", "/services/db/environment", {"MYSQL_USER": "app"})],
+            ["db: MYSQL_PASSWORD"],
+        ),
+        (
+            [
+                op(
+                    "replace",
+                    "/services/db/environment",
+                    {"MYSQL_USER": "a", "MYSQL_PASSWORD": "******"},
+                )
+            ],
+            ["db: MYSQL_PASSWORD"],
+        ),
+        ([op("remove", "/services/db/environment")], ["db: MYSQL_PASSWORD"]),
+        ([op("replace", "/services/db", {"image": "mysql:8.4"})], ["db: MYSQL_PASSWORD"]),
+        # credentials win over the gate: the command change does not make it a reject
+        (
+            [
+                op("replace", "/services/app/command", ["evil"]),
+                op("replace", "/services/db/environment/MYSQL_PASSWORD", "x"),
+            ],
+            ["db: MYSQL_PASSWORD"],
+        ),
+    ],
+)
+def test_a_patch_that_touches_a_credential_escalates_whole(patch, fields):
+    assert credentials_of(patch) == ("credentials", fields)
+
+
+def test_indexes_resolve_on_the_state_each_operation_sees():
+    before = {"services": {"app": {"environment": ["APP_MODE=a", "DB_PASSWORD=pw-value"]}}}
+    patch = [
+        op("remove", "/services/app/environment/0"),
+        op("replace", "/services/app/environment/0", "APP_MODE=b"),
+    ]
+    assert credentials_of(patch, before) == ("credentials", ["app: DB_PASSWORD"])
+
+
+def test_ordinary_environment_changes_are_judged_as_before():
+    assert credentials_of([op("replace", "/services/app/environment/1", "APP_MODE=b")]) == (
+        "apply",
+        [],
+    )
+    before = {"services": {"web": {"environment": {"APP_MODE": "a"}}}}
+    patch = [op("replace", "/services/web/environment", {"APP_MODE": "b"})]
+    assert judge(patch, {"web": {"APP_MODE"}}, frozenset(), before) == ("apply", [])
+
+
+@pytest.mark.parametrize(
+    "patch, fields",
+    [
+        # found before the failing operation: kept
+        (
+            [
+                op("replace", "/services/db/environment/MYSQL_PASSWORD", "x"),
+                op("replace", "/services/nope/mem_limit", "1g"),
+            ],
+            ["db: MYSQL_PASSWORD"],
+        ),
+        # after the failure, judged by path and value
+        (
+            [
+                op("replace", "/services/nope/mem_limit", "1g"),
+                op("remove", "/services/db/environment/MYSQL_PASSWORD"),
+            ],
+            ["db: MYSQL_PASSWORD"],
+        ),
+        # an index that cannot be resolved, on an environment that holds a secret key
+        (
+            [
+                op("replace", "/services/nope/mem_limit", "1g"),
+                op("replace", "/services/app/environment/7", "A=1"),
+            ],
+            ["app: environment"],
+        ),
+    ],
+)
+def test_a_patch_that_does_not_apply_still_escalates_its_credentials(patch, fields):
+    assert credentials_of(patch) == ("credentials", fields)
+
+
+def test_a_patch_that_does_not_apply_is_never_applied():
+    assert credentials_of([op("replace", "/services/db/mem_limit", "1g")]) == (
+        "reject",
+        ["patch does not apply"],
+    )
+
+
+def test_credential_reasons_name_fields_only():
+    _, reasons = credentials_of(
+        [op("replace", "/services/app/environment/0", "DB_PASSWORD=new-pw-1")]
+    )
+    text = " ".join(reasons)
+    assert "pw-value" not in text and "new-pw-1" not in text
+
+
+def test_a_model_cannot_send_test_operations():
+    with pytest.raises(ValidationError):
+        PatchOp(op="test", path="/services/db/environment/MYSQL_PASSWORD", value="app")
