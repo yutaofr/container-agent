@@ -37,7 +37,9 @@ def test_duplicate_name_across_roots_is_rejected(tmp_path):
 
 def test_template_placeholders_must_be_known(tmp_path):
     write_template(tmp_path, "mysql", MYSQL.replace('"{{db}}"', '"{{database}}"'))
-    with pytest.raises(CatalogError, match="unknown placeholders: database"):
+    with pytest.raises(
+        CatalogError, match="a placeholder is not host, port, or a connection value"
+    ):
         load_catalog(tmp_path)
 
 
@@ -113,3 +115,26 @@ def test_http_paths_with_anything_else_are_refused(path):
         Healthcheck(http=path)
     with pytest.raises(ValidationError):
         HttpProbe(path=path)
+
+
+SECRET = "sekrit-value-1"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        MYSQL.replace("port: 3306", f"port: {SECRET}"),
+        MYSQL.replace('default_version: "8.4"', f'default_version: "{SECRET}"'),
+        MYSQL.replace('"{{db}}"', '"{{sekritvalue1}}"'),
+        MYSQL + f"\nbroken: [{SECRET}\n",
+    ],
+    ids=["builtin-type", "own-validator", "placeholder-name", "yaml"],
+)
+def test_catalog_errors_never_echo_the_input(tmp_path, text):
+    write_template(tmp_path, "mysql", text)
+    with pytest.raises(CatalogError) as e:
+        load_catalog(tmp_path)
+    message = str(e.value)
+    assert SECRET not in message and "sekritvalue1" not in message
+    assert message.startswith(str(tmp_path / "middleware" / "mysql.yaml"))
+    assert e.value.__cause__ is None and e.value.__suppress_context__

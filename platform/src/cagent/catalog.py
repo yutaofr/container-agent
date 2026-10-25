@@ -11,6 +11,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from cagent.render import placeholders
+from cagent.secrets import safe_errors, yaml_problem
 
 # Names we accept for compose projects, services, and catalog entries.
 NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
@@ -81,7 +82,7 @@ class Runtime(Strict):
             if not names:
                 raise ValueError("http healthcheck needs at least one port")
             if hc.port is not None and hc.port not in names:
-                raise ValueError(f"healthcheck port {hc.port!r} is not one of {names}")
+                raise ValueError("the healthcheck port is not one of the ports")
         return self
 
 
@@ -112,7 +113,7 @@ class WorkdirSource(Strict):
     def _paths_inside(self) -> "WorkdirSource":
         for path in (self.dockerfile, self.context):
             if path is not None and not _inside(path):
-                raise ValueError(f"{path!r} must be a relative path inside the project")
+                raise ValueError("must be a relative path inside the project")
         return self
 
 
@@ -148,7 +149,7 @@ class RequirementInit(Strict):
     def _scripts_inside(cls, scripts: list[str]) -> list[str]:
         for path in scripts:
             if not _inside(path):
-                raise ValueError(f"script {path!r} must be a relative path inside the project")
+                raise ValueError("a script must be a relative path inside the project")
         return scripts
 
 
@@ -165,7 +166,7 @@ class Requirement(Strict):
             try:
                 SpecifierSet(v)
             except InvalidSpecifier as e:
-                raise ValueError(f"invalid version specifier {v!r}") from e
+                raise ValueError("invalid version specifier") from e
         return v
 
 
@@ -273,14 +274,14 @@ class MiddlewareTemplate(Strict):
         if "{version}" not in self.image:
             raise ValueError("image must contain {version}")
         if self.default_version not in self.versions:
-            raise ValueError(f"default_version {self.default_version!r} not in versions")
+            raise ValueError("default_version is not one of versions")
         if self.default_preset not in self.presets:
-            raise ValueError(f"default_preset {self.default_preset!r} not in presets")
+            raise ValueError("default_preset is not one of presets")
         known = {"host", "port", *self.connection}
         used = set().union(*(placeholders(v) for v in self.env.values()))
         used |= set().union(*(placeholders(c) for c in self.healthcheck.cmd or []))
-        if unknown := used - known:
-            raise ValueError(f"unknown placeholders: {', '.join(sorted(unknown))}")
+        if used - known:
+            raise ValueError("a placeholder is not host, port, or a connection value")
         if self.init is not None:
             self._check_init(self.init, known)
             if set(self.init.env) - set(self.env):
@@ -299,8 +300,8 @@ class MiddlewareTemplate(Strict):
             commands["topics"] = ([init.topics.run], known | {"topic", "partitions"})
         for kind, (texts, allowed) in commands.items():
             used = set().union(*(placeholders(t) for t in texts))
-            if unknown := used - allowed:
-                raise ValueError(f"init.{kind}: unknown placeholders: {', '.join(sorted(unknown))}")
+            if used - allowed:
+                raise ValueError(f"init.{kind}: a placeholder is not one this command may use")
 
 
 class CatalogError(Exception):
@@ -329,8 +330,10 @@ def _load_dir[M: Strict](directory: Path, model: type[M], into: dict[str, M]) ->
     for path in sorted(directory.glob("*.yaml")):
         try:
             item = model.model_validate(yaml.safe_load(path.read_text()))
-        except (yaml.YAMLError, ValidationError) as e:
-            raise CatalogError(f"{path}: {e}") from e
+        except yaml.YAMLError as e:
+            raise CatalogError(f"{path}: {yaml_problem(e)}") from None
+        except ValidationError as e:
+            raise CatalogError(f"{path}: {'; '.join(safe_errors(e))}") from None
         if item.name in into:
             raise CatalogError(f"{path}: duplicate name {item.name!r}")
         into[item.name] = item

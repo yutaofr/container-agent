@@ -28,6 +28,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+import yaml
+from pydantic import ValidationError
+
 SECRET_KEY = re.compile(r"(?i)password|passwd|pwd|secret|token|api_?key|access_?key")
 MASK = "******"
 LONG_SECRET = 8
@@ -319,3 +322,51 @@ def _walk(value: Any, known: set[str]) -> Any:
     if isinstance(value, list):
         return [_walk(v, known) for v in value]
     return value
+
+
+# Safe diagnostics. str(ValidationError) carries the input ("input_value=..."), and a YAML
+# error quotes the source; either may hold a secret and may reach a model or a page. A safe
+# diagnostic keeps the location and the rule: fixed text for Pydantic's own error types,
+# and the message of this code base's validators, which never interpolate input.
+_DESCRIPTIONS = {
+    "missing": "Field required",
+    "extra_forbidden": "Extra inputs are not permitted",
+    "literal_error": "Input is not one of the allowed values",
+    "string_pattern_mismatch": "Input does not match the allowed pattern",
+    "string_type": "Input should be a string",
+    "int_type": "Input should be an integer",
+    "int_parsing": "Input should be an integer",
+    "float_type": "Input should be a number",
+    "float_parsing": "Input should be a number",
+    "bool_type": "Input should be a boolean",
+    "bool_parsing": "Input should be a boolean",
+    "list_type": "Input should be a list",
+    "dict_type": "Input should be a mapping",
+    "model_type": "Input should be a mapping",
+    "too_long": "Too many items",
+    "too_short": "Too few items",
+    "greater_than": "Input is out of range",
+    "greater_than_equal": "Input is out of range",
+    "less_than": "Input is out of range",
+    "less_than_equal": "Input is out of range",
+}
+
+
+def safe_errors(e: ValidationError) -> list[str]:
+    """One "location: rule" line per error, without input values or error context."""
+    out = []
+    for err in e.errors(include_input=False, include_context=False, include_url=False):
+        loc = ".".join(str(p) for p in err["loc"]) or "(document)"
+        kind = err["type"]
+        if kind == "value_error" or kind.startswith("cagent_"):
+            text = err["msg"].removeprefix("Value error, ")
+        else:
+            text = _DESCRIPTIONS.get(kind, f"rule {kind}")
+        out.append(f"{loc}: {text}")
+    return out
+
+
+def yaml_problem(e: yaml.YAMLError) -> str:
+    """Where a YAML document broke, without quoting it."""
+    mark = getattr(e, "problem_mark", None)
+    return f"invalid YAML at line {mark.line + 1}" if mark is not None else "invalid YAML"

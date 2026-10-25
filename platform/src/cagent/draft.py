@@ -32,6 +32,7 @@ from cagent.catalog import (
 )
 from cagent.llm import ModelUnavailable, Router
 from cagent.render import placeholders
+from cagent.secrets import safe_errors, yaml_problem
 
 _PLACEHOLDER = re.compile(r"\$\{([A-Z][A-Z0-9_]*)(:[^}]*)?\}")
 _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
@@ -503,7 +504,7 @@ async def draft(
                     probes=[Probe(http=HttpProbe(path=p)) for p in answer.probe_paths],
                 )
             except ValidationError as e:
-                problems = [str(e)]
+                problems = safe_errors(e)
             else:
                 path = f".cagent/services/{service}.yaml"
                 text = _render(sk, service, descriptor)
@@ -523,7 +524,7 @@ def read_back(service: str, inspection: dict[str, Any]) -> ServiceDescriptor:
     try:
         doc = yaml.safe_load(files[path])
     except yaml.YAMLError as e:
-        raise DraftError(f"{path} is not valid YAML: {e}") from e
+        raise DraftError(f"{path} is not valid YAML: {yaml_problem(e)}") from None
     if isinstance(doc, dict) and doc.get("name") != service:
         raise DraftError(f"{path} names {doc.get('name')}, not {service}")
     if MASK in files[path]:
@@ -534,7 +535,7 @@ def read_back(service: str, inspection: dict[str, Any]) -> ServiceDescriptor:
     try:
         desc = ServiceDescriptor.model_validate(doc)
     except ValidationError as e:
-        raise DraftError(f"{path}: {e}") from e
+        raise DraftError(f"{path}: {'; '.join(safe_errors(e))}") from None
     if desc.sources.workdir is None:
         raise DraftError(f"{path} declares no workdir source")
     return desc
