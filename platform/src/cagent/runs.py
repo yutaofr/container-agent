@@ -57,6 +57,7 @@ PAYLOAD_FIELDS = {
         "fix",
         "root_cause",
         "tier",
+        "fields",
         "detail",
         "result",
         "source",

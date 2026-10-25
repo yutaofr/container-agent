@@ -100,6 +100,10 @@ ESCALATIONS = {
     "no_fix": "The model found no fix inside the environment.",
     "model_unavailable": "No model answered.",
     "patch_rejected": "You rejected the proposed patch.",
+    "credentials": (
+        "The model's patch touches credential fields; a person must handle it. Nothing was "
+        "changed, and no model is asked again until you choose Retry."
+    ),
     "clarify": "The spec has problems no question can settle.",
     "unsupported_source": "A service uses a source kind the POC cannot build.",
 }
