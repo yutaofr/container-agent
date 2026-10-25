@@ -3,6 +3,7 @@
 import json
 import shutil
 import subprocess
+import tarfile
 
 import pytest
 import yaml
@@ -278,3 +279,43 @@ def test_an_unexpected_crash_exits_2_not_1(repo, monkeypatch, capsys):
     monkeypatch.setattr(cli, "write_report", boom)
     assert cli.main(["--repo", str(repo), "report", str(repo / "nowhere")]) == 2
     assert "unexpected FileExistsError" in capsys.readouterr().err
+
+
+REPORT_FILES = ("manifest.json", "summary.json", "judgements.json", "report.md")
+
+
+def files_of(d):
+    return {p.relative_to(d): p.read_bytes() for p in d.rglob("*") if p.is_file()}
+
+
+async def test_pack_exports_a_copy_without_the_repository_path(repo, tmp_path):
+    d = await start(repo)
+    await evaluate.run(d, repo / "scenarios", repo / "catalog", tools(sim_for), log=lambda _: None)
+    for result in d.rglob("result.json"):  # a Runner log names the project, as a workdir does
+        (result.parent / "runner.log").write_text(f"workdir {repo}/scenarios/fixtures/app\n")
+    before = files_of(d)
+    assert sum(str(repo).encode() in data for data in before.values()) >= 2
+    assert cli.main(["--repo", str(repo), "pack", str(d)]) == 0
+    assert files_of(d) == before  # the evaluation itself is never changed
+
+    unpacked = tmp_path / "unpacked"
+    with tarfile.open(d.with_name(d.name + "-evidence.tar.gz")) as tar:
+        tar.extractall(unpacked, filter="data")
+    copy = unpacked / d.name
+    exported = b"".join(files_of(copy).values())
+    assert str(repo).encode() not in exported and b"<repo>" in exported
+    write_report(copy)  # the unpacked pack reproduces the report byte for byte
+    assert {f: (copy / f).read_bytes() for f in REPORT_FILES} == {
+        f: (d / f).read_bytes() for f in REPORT_FILES
+    }
+
+
+async def test_pack_stops_when_the_path_is_part_of_a_scored_file(repo, capsys):
+    d = await start(repo)
+    await evaluate.run(d, repo / "scenarios", repo / "catalog", tools(sim_for), log=lambda _: None)
+    manifest = json.loads((d / "manifest.json").read_text())
+    (d / "manifest.json").write_text(json.dumps({**manifest, "where": str(repo)}))
+    write_report(d)
+    assert cli.main(["--repo", str(repo), "pack", str(d)]) == 2
+    assert "manifest.json" in capsys.readouterr().err
+    assert not d.with_name(d.name + "-evidence.tar.gz").exists()
