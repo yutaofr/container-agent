@@ -4,7 +4,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from cagent.catalog import CatalogError, ServiceDescriptor, load_catalog
+from cagent.catalog import CatalogError, Healthcheck, HttpProbe, ServiceDescriptor, load_catalog
 
 from .conftest import FIXTURE_CATALOG, REPO_CATALOG
 
@@ -88,3 +88,28 @@ def test_kafka_healthcheck_starts_no_jvm(catalog):
     past the 3 s healthcheck timeout, so Kafka never turned healthy on CI."""
     cmd = " ".join(catalog.middleware["kafka"].healthcheck.cmd)
     assert "/opt/kafka/bin/" not in cmd
+
+
+def test_init_env_names_keys_of_the_template_env(tmp_path):
+    write_template(
+        tmp_path, "mysql", MYSQL.replace("[MYSQL_ROOT_PASSWORD]", "[MYSQL_ROOT_PASSWORD, NOPE]")
+    )
+    with pytest.raises(CatalogError, match="init.env"):
+        load_catalog(tmp_path)
+
+
+@pytest.mark.parametrize("path", ["/", "/health", "/check?a=1&b=2", "/a%20b/c.d_e~f"])
+def test_http_paths_that_are_plain_paths_load(path):
+    Healthcheck(http=path)
+    HttpProbe(path=path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["health", "/x'y", '/x"y', "/x\n", "/x y", "/$(id)", "/x`id`", "/x;id", "/x|y", "/a\\b"],
+)
+def test_http_paths_with_anything_else_are_refused(path):
+    with pytest.raises(ValidationError):
+        Healthcheck(http=path)
+    with pytest.raises(ValidationError):
+        HttpProbe(path=path)

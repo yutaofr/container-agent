@@ -1,6 +1,7 @@
 """Service descriptors and middleware templates, and loading them from catalog directories."""
 
 import posixpath
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
@@ -28,6 +29,20 @@ class Port(Strict):
     container: PortNumber
 
 
+# An HTTP path the generator splices into a curl command: a plain path and query, nothing a
+# shell would read (F1 design, section 5). Matched in full.
+HTTP_PATH = re.compile(r"/[A-Za-z0-9._~/%-]*(\?[A-Za-z0-9._~=&%-]*)?")
+
+
+def _plain_http_path(path: str | None) -> str | None:
+    if path is not None and not HTTP_PATH.fullmatch(path):
+        raise ValueError(
+            "an http path is / followed by letters, digits, and ._~/%- with an optional "
+            "?query of the same and =&"
+        )
+    return path
+
+
 class Healthcheck(Strict):
     """Either http (a path checked with curl on a named port) or cmd (a compose test)."""
 
@@ -35,6 +50,11 @@ class Healthcheck(Strict):
     port: str | None = None  # port name for http; defaults to the first port
     expect: int = 200
     cmd: list[str] | None = None
+
+    @field_validator("http")
+    @classmethod
+    def _http_is_plain(cls, v: str | None) -> str | None:
+        return _plain_http_path(v)
 
     @model_validator(mode="after")
     def _one_kind(self) -> "Healthcheck":
@@ -154,6 +174,11 @@ class HttpProbe(Strict):
     expect: int = 200
     port: str | None = None
 
+    @field_validator("path")
+    @classmethod
+    def _path_is_plain(cls, v: str) -> str:
+        return _plain_http_path(v) or v
+
 
 class Probe(Strict):
     http: HttpProbe
@@ -220,6 +245,9 @@ class TemplateInit(Strict):
     keyspaces: InitCommand | None = None
     topics: InitCommand | None = None
     mem_limit: str = "256m"
+    # Keys of the template's env the init service gets, with the values the middleware
+    # service has; commands read them as "$KEY", so no secret is written into a command.
+    env: list[str] = []
 
 
 class MiddlewareTemplate(Strict):
@@ -255,6 +283,8 @@ class MiddlewareTemplate(Strict):
             raise ValueError(f"unknown placeholders: {', '.join(sorted(unknown))}")
         if self.init is not None:
             self._check_init(self.init, known)
+            if set(self.init.env) - set(self.env):
+                raise ValueError("init.env names a key the template's env does not set")
         return self
 
     @staticmethod
