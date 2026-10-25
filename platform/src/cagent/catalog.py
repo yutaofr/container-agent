@@ -11,7 +11,14 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from cagent.render import placeholders
-from cagent.secrets import safe_errors, yaml_problem
+from cagent.secrets import (
+    lint_command,
+    lint_error,
+    lint_shell,
+    lint_text,
+    safe_errors,
+    yaml_problem,
+)
 
 # Names we accept for compose projects, services, and catalog entries.
 NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
@@ -41,7 +48,21 @@ def _plain_http_path(path: str | None) -> str | None:
             "an http path is / followed by letters, digits, and ._~/%- with an optional "
             "?query of the same and =&"
         )
+    if path is not None and (rule := lint_text(path)):
+        raise lint_error(rule)
     return path
+
+
+def _no_secret_in_command(value: list[str] | None) -> list[str] | None:
+    if value is not None and (rule := lint_command(value)):
+        raise lint_error(rule)
+    return value
+
+
+def _no_secret_in_shell(value: str) -> str:
+    if rule := lint_shell(value):
+        raise lint_error(rule)
+    return value
 
 
 class Healthcheck(Strict):
@@ -56,6 +77,11 @@ class Healthcheck(Strict):
     @classmethod
     def _http_is_plain(cls, v: str | None) -> str | None:
         return _plain_http_path(v)
+
+    @field_validator("cmd")
+    @classmethod
+    def _cmd_holds_no_secret(cls, v: list[str] | None) -> list[str] | None:
+        return _no_secret_in_command(v)
 
     @model_validator(mode="after")
     def _one_kind(self) -> "Healthcheck":
@@ -228,6 +254,11 @@ class Preset(Strict):
 class InitCommand(Strict):
     run: str  # one shell command, run once per keyspace or topic
 
+    @field_validator("run")
+    @classmethod
+    def _holds_no_secret(cls, v: str) -> str:
+        return _no_secret_in_shell(v)
+
 
 class ScriptInit(Strict):
     """How a template runs one script file ($file) and records it by content ($sha)."""
@@ -236,6 +267,11 @@ class ScriptInit(Strict):
     run: str
     marked: str  # exits 0 when $sha is already recorded
     mark: str  # records $sha after run succeeded
+
+    @field_validator("run", "marked", "mark")
+    @classmethod
+    def _holds_no_secret(cls, v: str) -> str:
+        return _no_secret_in_shell(v)
 
 
 class TemplateInit(Strict):
@@ -268,6 +304,11 @@ class MiddlewareTemplate(Strict):
     presets: dict[str, Preset]
     default_preset: str = "tiny"
     init: TemplateInit | None = None
+
+    @field_validator("command")
+    @classmethod
+    def _command_holds_no_secret(cls, v: list[str] | None) -> list[str] | None:
+        return _no_secret_in_command(v)
 
     @model_validator(mode="after")
     def _consistent(self) -> "MiddlewareTemplate":

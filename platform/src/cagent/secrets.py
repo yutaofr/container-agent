@@ -30,6 +30,9 @@ from typing import Any
 
 import yaml
 from pydantic import ValidationError
+from pydantic_core import PydanticCustomError
+
+from cagent.render import placeholders
 
 SECRET_KEY = re.compile(r"(?i)password|passwd|pwd|secret|token|api_?key|access_?key")
 MASK = "******"
@@ -370,3 +373,64 @@ def yaml_problem(e: yaml.YAMLError) -> str:
     """Where a YAML document broke, without quoting it."""
     mark = getattr(e, "problem_mark", None)
     return f"invalid YAML at line {mark.line + 1}" if mark is not None else "invalid YAML"
+
+
+# Catalog lint (F1 design, section 5): command fields never hold a secret. It cannot prove
+# that arbitrary shell holds none; prompt masking stays behind it.
+LINT_RULES = {
+    "L1": "L1: a secret placeholder in a command; read the secret from a container variable",
+    "L2": "L2: a literal value in a credential position",
+    "L3": "L3: a secret variable with a literal default",
+    "L4": "L4: cannot be checked safely: unsupported shell syntax around a credential",
+}
+_SECRET_DEFAULT = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?[-=]")
+
+
+def _lint_common(text: str) -> str | None:
+    if any(SECRET_KEY.search(name) for name in placeholders(text)):
+        return "L1"
+    if any(SECRET_KEY.search(m.group(1)) for m in _SECRET_DEFAULT.finditer(text)):
+        return "L3"
+    return None
+
+
+def lint_shell(text: str) -> str | None:
+    """The first lint rule shell text breaks, or None."""
+    if rule := _lint_common(text):
+        return rule
+    _, unsupported = _parse(text)
+    if unsupported and trigger(text):
+        return "L4"
+    return "L2" if mask_shell(text) != text else None
+
+
+def lint_argv(argv: list[str]) -> str | None:
+    """The first lint rule an argument array breaks, or None."""
+    for arg in argv:
+        if rule := _lint_common(arg):
+            return rule
+    for k, arg in enumerate(argv[:-2]):
+        if posixpath.basename(arg) in _SHELLS and argv[k + 1] == "-c":
+            if rule := lint_shell(argv[k + 2]):
+                return rule
+    return "L2" if mask_argv(argv) != argv else None
+
+
+def lint_command(value: list[str] | str) -> str | None:
+    """A compose-style command or healthcheck test: CMD-SHELL text, CMD arguments, or argv."""
+    if isinstance(value, str):
+        return lint_shell(value)
+    if value[:1] == ["CMD-SHELL"]:
+        return next((r for t in value[1:] if (r := lint_shell(t))), None)
+    return lint_argv(value[1:] if value[:1] == ["CMD"] else value)
+
+
+def lint_text(text: str) -> str | None:
+    """A string that is no command but ends up in one, such as an HTTP path."""
+    if rule := _lint_common(text):
+        return rule
+    return "L2" if mask_text(text) != text else None
+
+
+def lint_error(rule: str) -> PydanticCustomError:
+    return PydanticCustomError(f"cagent_secret_{rule}", LINT_RULES[rule])
