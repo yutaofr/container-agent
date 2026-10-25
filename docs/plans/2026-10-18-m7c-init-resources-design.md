@@ -76,13 +76,14 @@ requires:
 A template's `init` block says which kinds it supports and how to run them. `{{host}}` and the connection values resolve as in `bind`; the loop sets `$file` and `$sha`.
 
 ```yaml
-# mysql.yaml
+# mysql.yaml (since F1, the init service gets MYSQL_ROOT_PASSWORD and commands read it)
 init:
+  env: [MYSQL_ROOT_PASSWORD]
   scripts:
     suffix: .sql
-    run:    mysql -h{{host}} -uroot -proot {{db}} < "$file"
-    marked: mysql -h{{host}} -uroot -proot -N -e "SELECT 1 FROM cagent.init WHERE sha='$sha'" | grep -q 1
-    mark:   mysql -h{{host}} -uroot -proot -e "CREATE DATABASE IF NOT EXISTS cagent; CREATE TABLE IF NOT EXISTS cagent.init(sha CHAR(64) PRIMARY KEY); INSERT INTO cagent.init VALUES('$sha')"
+    run:    mysql -h{{host}} -uroot -p"$MYSQL_ROOT_PASSWORD" {{db}} < "$file"
+    marked: mysql -h{{host}} -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "SELECT 1 FROM cagent.init WHERE sha='$sha'" | grep -q 1
+    mark:   mysql -h{{host}} -uroot -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE IF NOT EXISTS cagent; CREATE TABLE IF NOT EXISTS cagent.init(sha CHAR(64) PRIMARY KEY); INSERT INTO cagent.init VALUES('$sha')"
 
 # kafka.yaml
 init:
