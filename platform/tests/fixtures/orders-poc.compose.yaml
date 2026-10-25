@@ -37,7 +37,7 @@ services:
     healthcheck:
       test:
       - CMD-SHELL
-      - mysqladmin ping -h 127.0.0.1 -uapp -papp --silent
+      - mysqladmin ping -h 127.0.0.1 -uapp -p"$$MYSQL_PASSWORD" --silent
       interval: 5s
       timeout: 3s
       retries: 30

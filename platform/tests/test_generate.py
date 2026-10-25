@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from cagent.catalog import load_catalog
+from cagent.catalog import Catalog, Healthcheck, load_catalog
 from cagent.generate import GenerationError, generate, image_tag, to_yaml
 from cagent.spec import Source
 
@@ -140,3 +140,22 @@ def test_undeclared_source_kind_offers_the_declared_ones(catalog):
         ("release", "snapshot"),
         "release",
     )
+
+
+def test_http_healthchecks_quote_the_url_only_when_needed(catalog, orders_spec):
+    hc = generate(orders_spec, catalog)["services"]["order-service"]["healthcheck"]["test"][1]
+    assert " http://localhost:8080/actuator/health)" in hc
+    descriptor = catalog.services["order-service"]
+    runtime = descriptor.runtime.model_copy(
+        update={"healthcheck": Healthcheck(http="/check?a=1&b=2")}
+    )
+    services = {"order-service": descriptor.model_copy(update={"runtime": runtime})}
+    quoted = generate(orders_spec, Catalog(services, catalog.middleware))
+    test = quoted["services"]["order-service"]["healthcheck"]["test"][1]
+    assert " 'http://localhost:8080/check?a=1&b=2')" in test
+
+
+def test_mysql_reads_its_passwords_from_the_container(catalog, orders_spec):
+    mysql = generate(orders_spec, catalog)["services"]["mysql"]
+    assert '-p"$$MYSQL_PASSWORD"' in mysql["healthcheck"]["test"][1]
+    assert "-papp" not in mysql["healthcheck"]["test"][1]

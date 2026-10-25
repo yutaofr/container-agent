@@ -214,3 +214,24 @@ def test_generated_loop_stops_at_a_failing_script(tmp_path, monkeypatch):
     assert result.returncode != 0
     assert f"cagent init failed: {root}/aaa/01-x.sql" in result.stderr
     assert not log.exists() or "mark" not in log.read_text()
+
+
+def test_mysql_init_gets_only_the_root_password_variable(tmp_path):
+    services = generate(spec("orders"), catalog_with(tmp_path, ORDERS))["services"]
+    init = services["mysql-init"]
+    assert init["environment"] == {"MYSQL_ROOT_PASSWORD": "root"}
+    script = init["entrypoint"][2]
+    assert script.count('-p"$$MYSQL_ROOT_PASSWORD"') == 3 and "-proot" not in script
+
+
+SECRETDB = FAKEDB.replace(
+    "healthcheck:", 'env: { DB_ROOT_PASSWORD: "pa$s", DB_MODE: x }\nhealthcheck:'
+).replace("init:\n", "init:\n  env: [DB_ROOT_PASSWORD]\n")
+
+
+def test_init_environment_values_are_escaped_once(tmp_path):
+    a = APP.format(name="aaa", requires="  - capability: mysql\n    init: { keyspaces: [ks] }")
+    cat = catalog_with(tmp_path, a, extra_middleware=SECRETDB.replace("LOG", "/dev/null"))
+    services = generate(spec("aaa", middleware=("fakedb",)), cat)["services"]
+    assert services["fakedb"]["environment"]["DB_ROOT_PASSWORD"] == "pa$$s"
+    assert services["fakedb-init"]["environment"] == {"DB_ROOT_PASSWORD": "pa$$s"}

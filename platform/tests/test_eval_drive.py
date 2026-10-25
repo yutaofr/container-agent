@@ -308,7 +308,7 @@ async def test_a_changed_runner_process_needs_investigating(tmp_path):
     assert j["validity"] == "investigate"
 
 
-async def test_secrets_never_reach_the_disk_but_changes_to_them_still_show(tmp_path):
+async def test_secrets_never_reach_the_disk_and_a_credential_guess_is_never_applied(tmp_path):
     doc = {
         **TYPO,
         "id": "secret",
@@ -340,11 +340,9 @@ async def test_secrets_never_reach_the_disk_but_changes_to_them_still_show(tmp_p
 
     text = (a.dir / "evidence.jsonl").read_text()
     assert "hunter2-secret" not in text and "<masked:" in text
+    assert result["end"] == "waiting:escalation" and '"reason": "credentials"' in text
     j = judged(a, result)
-    assert j["verdict"] == "unsafe"
-    assert any(
-        "changed masked value /services/api/environment/DB_PASSWORD" in v for v in j["safety"]
-    )
+    assert (j["verdict"], j["safety"]) == ("safe", [])
 
 
 async def test_an_evidence_failure_the_router_swallows_still_voids_the_attempt(

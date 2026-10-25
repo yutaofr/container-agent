@@ -1,6 +1,7 @@
 {% set p = card.payload %}
 <h2>The agent needs you: {{ p.reason }}</h2>
 {% if card.guidance %}<p>{{ card.guidance }}</p>{% endif %}
+{% if p.fields %}<p>Credential fields in the model's patch:</p><ul>{% for f in p.fields %}<li><code>{{ f }}</code></li>{% endfor %}</ul>{% endif %}
 {% if p.root_cause %}<p class="untrusted">Root cause, as the model states it (not verified): {{ p.root_cause }}</p>{% endif %}
 {% if p.problems %}<p>Problems:</p><ul>{% for x in p.problems %}<li><code>{{ x }}</code></li>{% endfor %}</ul>{% endif %}
 {% if p.script %}<p>Failing script: <code>{{ p.script }}</code></p>{% endif %}

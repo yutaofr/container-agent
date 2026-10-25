@@ -3,6 +3,7 @@
 import difflib
 import hashlib
 import re
+import shlex
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,7 +50,7 @@ def _healthcheck(hc: Healthcheck, ports: dict[str, int], values: dict[str, str])
         test = [escape_compose(render(part, values)) for part in hc.cmd]
     else:
         port = ports[hc.port] if hc.port else next(iter(ports.values()))
-        url = f"http://localhost:{port}{hc.http}"
+        url = shlex.quote(f"http://localhost:{port}{hc.http}")
         probe = f"test \"$(curl -s -o /dev/null -w '%{{http_code}}' {url})\" = {hc.expect}"
         test = ["CMD-SHELL", escape_compose(probe)]
     return {"test": test, **HEALTH_TIMING}
@@ -306,6 +307,10 @@ def generate(spec: ClusterSpec, catalog: Catalog) -> dict[str, Any]:
             "mem_limit": (tpl.init or TemplateInit()).mem_limit,
             "labels": dict(INIT_LABELS),
         }
+        if tpl.init and tpl.init.env:  # already rendered and escaped for the middleware
+            init_svc["environment"] = {
+                k: services[provider]["environment"][k] for k in sorted(tpl.init.env)
+            }
         if w.scripts:
             init_svc["volumes"] = [
                 f"./init/{consumer}/{capability}:{INIT_ROOT}/{consumer}:ro"

@@ -65,11 +65,17 @@ def test_shipped_templates_declare_their_init_kinds(catalog):
 @pytest.mark.parametrize(
     ("init", "match"),
     [
-        ({"topics": {"run": "kafka-topics --topic {{topic}} --broker {{brokers}}"}}, "brokers"),
-        ({"keyspaces": {"run": "cqlsh -e 'CREATE KEYSPACE {{topic}}'"}}, "topic"),
+        (
+            {"topics": {"run": "kafka-topics --topic {{topic}} --broker {{brokers}}"}},
+            "init.topics: a placeholder",
+        ),
+        (
+            {"keyspaces": {"run": "cqlsh -e 'CREATE KEYSPACE {{topic}}'"}},
+            "init.keyspaces: a placeholder",
+        ),
         (
             {"scripts": {"suffix": ".sql", "run": "mysql {{keyspace}}", "marked": "", "mark": ""}},
-            "keyspace",
+            "init.scripts: a placeholder",
         ),
         ({"scripts": {"suffix": "sql", "run": "x", "marked": "x", "mark": "y"}}, "suffix"),
     ],

@@ -256,3 +256,25 @@ def test_read_back_validates_the_file_on_disk():
 def test_read_back_refuses_what_cannot_be_used(files, why):
     with pytest.raises(DraftError, match=why):
         read_back("ui", inspection(files))
+
+
+async def test_draft_feedback_never_echoes_the_answer(catalog):
+    bad = answer(probe_paths=["/x;sekrit-value-1"])
+    fake = FakeCompleter({"fake/large": [bad, answer()]})
+    await draft(Router(CONFIG, fake), "orders-api", SHOP, catalog)
+    feedback = fake.calls[1][1].split("Your previous answer was invalid:")[1]
+    assert "sekrit-value-1" not in feedback and "path: an http path is" in feedback
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "name: [unclosed sekrit-value-1",
+        DOCKERFILE_DESC.replace("kind: app", "kind: sekrit-value-1"),
+    ],
+)
+def test_read_back_errors_never_echo_the_file(text):
+    with pytest.raises(DraftError) as e:
+        read_back("ui", inspection({".cagent/services/ui.yaml": text}))
+    assert "sekrit-value-1" not in str(e.value)
+    assert e.value.__cause__ is None and e.value.__suppress_context__

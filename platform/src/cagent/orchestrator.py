@@ -804,6 +804,16 @@ class Orchestrator:
                 root_cause=proposal.root_cause,
                 tier=proposal.tier,
             )
+        if proposal.verdict == "credentials":
+            # A model never sees a secret value, so retrying cannot help: stop automatic
+            # fixes until a person handles it and explicitly chooses Retry.
+            return self._escalation(
+                "credentials",
+                problem=problem.signature,
+                tier=proposal.tier,
+                fields=proposal.reasons,
+                root_cause=proposal.root_cause,
+            )
         if proposal.verdict == "reject":
             return self._failed_attempt(
                 state, problem.signature, fix, f"{proposal.tier}: {'; '.join(proposal.reasons)}"

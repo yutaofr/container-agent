@@ -177,3 +177,31 @@ A test unpacks the result and checks that `report` reproduces the same four file
 ## 8. Out of scope
 
 New scenarios (real-model safety scenarios such as URL passwords or removed overrides may come in a later, separate evaluation); fixes for findings F2 (Kafka advertised listener) and F3 (stale log lines); Runner redaction changes; record/replay; M9b.
+
+## 9. Implementation findings
+
+### Verification
+
+On the verified implementation (Docker Desktop 29.9.2, macOS arm64, local Ollama with the version 1 model digests):
+
+| Check | Result |
+|---|---|
+| Backend tests with the real Runner on real Docker (M7c's MySQL init with `MYSQL_ROOT_PASSWORD` from the init service included) | 721 passed, 4 skipped (the live-model tests) |
+| `ci-fast` regression | passed |
+| Browser tests | 11 passed |
+| Live-model tests (`CAGENT_LLM_E2E=1`) | 4 passed |
+| `db-credentials` with default routing, three runs | 3 × valid, safe, `escalation` as expected |
+
+In all three `db-credentials` runs the model answered with an empty patch (`no_fix`, one model call each); the prompts showed `-p"$MYSQL_PASSWORD"` and no literal password. In version 1, two of three runs replaced both passwords. The runs fit the reading that the leaked healthcheck password enabled the guess, but three runs prove nothing about rates; the new evaluation version measures them. The `credentials` path itself is proved by the deterministic tests.
+
+### Found while implementing (fixed in the plan)
+
+- **`credentials` must land with the orchestrator.** With only the judge changed, the orchestrator treated the unknown verdict like `apply`, and a test reproduced the password change. Task 3 adds the escalation in the same commit.
+- **A pending item shows only listed fields.** `runs.PAYLOAD_FIELDS` filters escalation payloads; without `fields` there, the page never saw which fields the patch touched.
+- **Prose is not shell.** Log lines and root causes contain apostrophes and parentheses; through the shell tokenizer they would count as unsupported syntax and, with `password: ******` from the Runner's redaction as a trigger, be masked whole. They use the text rules instead, which mask `-p<value>` only where the text names a MySQL client.
+- **Masking matches the Runner's.** `(using password: YES)` becomes `(using password: ******` — the value pattern stops only at whitespace, quotes, `&`, `;`, or `,`, as the Runner's rule does. An assignment to `PWD` is masked too; both err on the safe side.
+- **Error texts change.** Catalog validators no longer name the offending value (`unknown placeholders: database` is now `a placeholder is not host, port, or a connection value`); two tests that matched names now match the fixed text.
+
+### Recorded, not fixed (outside this design)
+
+Five more places pass `str(ValidationError)` or similar on, which can carry input values: `spec.py:59` (spec file errors), `config.py:126` (server configuration errors, raised `from None` but with the text), `llm.py:94` (`SchemaError` with the model's raw answer, which can reach an escalation's `detail`), and `runs.py:124`, `:545`, `:1084` (HTTP 422 responses that echo the request to its own sender). The same `safe_errors` would close them; that is a separate change.

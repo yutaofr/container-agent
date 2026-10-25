@@ -1,6 +1,7 @@
 """Service descriptors and middleware templates, and loading them from catalog directories."""
 
 import posixpath
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
@@ -10,6 +11,14 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from cagent.render import placeholders
+from cagent.secrets import (
+    lint_command,
+    lint_error,
+    lint_shell,
+    lint_text,
+    safe_errors,
+    yaml_problem,
+)
 
 # Names we accept for compose projects, services, and catalog entries.
 NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
@@ -28,6 +37,34 @@ class Port(Strict):
     container: PortNumber
 
 
+# An HTTP path the generator splices into a curl command: a plain path and query, nothing a
+# shell would read (F1 design, section 5). Matched in full.
+HTTP_PATH = re.compile(r"/[A-Za-z0-9._~/%-]*(\?[A-Za-z0-9._~=&%-]*)?")
+
+
+def _plain_http_path(path: str | None) -> str | None:
+    if path is not None and not HTTP_PATH.fullmatch(path):
+        raise ValueError(
+            "an http path is / followed by letters, digits, and ._~/%- with an optional "
+            "?query of the same and =&"
+        )
+    if path is not None and (rule := lint_text(path)):
+        raise lint_error(rule)
+    return path
+
+
+def _no_secret_in_command(value: list[str] | None) -> list[str] | None:
+    if value is not None and (rule := lint_command(value)):
+        raise lint_error(rule)
+    return value
+
+
+def _no_secret_in_shell(value: str) -> str:
+    if rule := lint_shell(value):
+        raise lint_error(rule)
+    return value
+
+
 class Healthcheck(Strict):
     """Either http (a path checked with curl on a named port) or cmd (a compose test)."""
 
@@ -35,6 +72,16 @@ class Healthcheck(Strict):
     port: str | None = None  # port name for http; defaults to the first port
     expect: int = 200
     cmd: list[str] | None = None
+
+    @field_validator("http")
+    @classmethod
+    def _http_is_plain(cls, v: str | None) -> str | None:
+        return _plain_http_path(v)
+
+    @field_validator("cmd")
+    @classmethod
+    def _cmd_holds_no_secret(cls, v: list[str] | None) -> list[str] | None:
+        return _no_secret_in_command(v)
 
     @model_validator(mode="after")
     def _one_kind(self) -> "Healthcheck":
@@ -61,7 +108,7 @@ class Runtime(Strict):
             if not names:
                 raise ValueError("http healthcheck needs at least one port")
             if hc.port is not None and hc.port not in names:
-                raise ValueError(f"healthcheck port {hc.port!r} is not one of {names}")
+                raise ValueError("the healthcheck port is not one of the ports")
         return self
 
 
@@ -92,7 +139,7 @@ class WorkdirSource(Strict):
     def _paths_inside(self) -> "WorkdirSource":
         for path in (self.dockerfile, self.context):
             if path is not None and not _inside(path):
-                raise ValueError(f"{path!r} must be a relative path inside the project")
+                raise ValueError("must be a relative path inside the project")
         return self
 
 
@@ -128,7 +175,7 @@ class RequirementInit(Strict):
     def _scripts_inside(cls, scripts: list[str]) -> list[str]:
         for path in scripts:
             if not _inside(path):
-                raise ValueError(f"script {path!r} must be a relative path inside the project")
+                raise ValueError("a script must be a relative path inside the project")
         return scripts
 
 
@@ -145,7 +192,7 @@ class Requirement(Strict):
             try:
                 SpecifierSet(v)
             except InvalidSpecifier as e:
-                raise ValueError(f"invalid version specifier {v!r}") from e
+                raise ValueError("invalid version specifier") from e
         return v
 
 
@@ -153,6 +200,11 @@ class HttpProbe(Strict):
     path: str
     expect: int = 200
     port: str | None = None
+
+    @field_validator("path")
+    @classmethod
+    def _path_is_plain(cls, v: str) -> str:
+        return _plain_http_path(v) or v
 
 
 class Probe(Strict):
@@ -202,6 +254,11 @@ class Preset(Strict):
 class InitCommand(Strict):
     run: str  # one shell command, run once per keyspace or topic
 
+    @field_validator("run")
+    @classmethod
+    def _holds_no_secret(cls, v: str) -> str:
+        return _no_secret_in_shell(v)
+
 
 class ScriptInit(Strict):
     """How a template runs one script file ($file) and records it by content ($sha)."""
@@ -210,6 +267,11 @@ class ScriptInit(Strict):
     run: str
     marked: str  # exits 0 when $sha is already recorded
     mark: str  # records $sha after run succeeded
+
+    @field_validator("run", "marked", "mark")
+    @classmethod
+    def _holds_no_secret(cls, v: str) -> str:
+        return _no_secret_in_shell(v)
 
 
 class TemplateInit(Strict):
@@ -220,6 +282,9 @@ class TemplateInit(Strict):
     keyspaces: InitCommand | None = None
     topics: InitCommand | None = None
     mem_limit: str = "256m"
+    # Keys of the template's env the init service gets, with the values the middleware
+    # service has; commands read them as "$KEY", so no secret is written into a command.
+    env: list[str] = []
 
 
 class MiddlewareTemplate(Strict):
@@ -240,21 +305,28 @@ class MiddlewareTemplate(Strict):
     default_preset: str = "tiny"
     init: TemplateInit | None = None
 
+    @field_validator("command")
+    @classmethod
+    def _command_holds_no_secret(cls, v: list[str] | None) -> list[str] | None:
+        return _no_secret_in_command(v)
+
     @model_validator(mode="after")
     def _consistent(self) -> "MiddlewareTemplate":
         if "{version}" not in self.image:
             raise ValueError("image must contain {version}")
         if self.default_version not in self.versions:
-            raise ValueError(f"default_version {self.default_version!r} not in versions")
+            raise ValueError("default_version is not one of versions")
         if self.default_preset not in self.presets:
-            raise ValueError(f"default_preset {self.default_preset!r} not in presets")
+            raise ValueError("default_preset is not one of presets")
         known = {"host", "port", *self.connection}
         used = set().union(*(placeholders(v) for v in self.env.values()))
         used |= set().union(*(placeholders(c) for c in self.healthcheck.cmd or []))
-        if unknown := used - known:
-            raise ValueError(f"unknown placeholders: {', '.join(sorted(unknown))}")
+        if used - known:
+            raise ValueError("a placeholder is not host, port, or a connection value")
         if self.init is not None:
             self._check_init(self.init, known)
+            if set(self.init.env) - set(self.env):
+                raise ValueError("init.env names a key the template's env does not set")
         return self
 
     @staticmethod
@@ -269,8 +341,8 @@ class MiddlewareTemplate(Strict):
             commands["topics"] = ([init.topics.run], known | {"topic", "partitions"})
         for kind, (texts, allowed) in commands.items():
             used = set().union(*(placeholders(t) for t in texts))
-            if unknown := used - allowed:
-                raise ValueError(f"init.{kind}: unknown placeholders: {', '.join(sorted(unknown))}")
+            if used - allowed:
+                raise ValueError(f"init.{kind}: a placeholder is not one this command may use")
 
 
 class CatalogError(Exception):
@@ -299,8 +371,10 @@ def _load_dir[M: Strict](directory: Path, model: type[M], into: dict[str, M]) ->
     for path in sorted(directory.glob("*.yaml")):
         try:
             item = model.model_validate(yaml.safe_load(path.read_text()))
-        except (yaml.YAMLError, ValidationError) as e:
-            raise CatalogError(f"{path}: {e}") from e
+        except yaml.YAMLError as e:
+            raise CatalogError(f"{path}: {yaml_problem(e)}") from None
+        except ValidationError as e:
+            raise CatalogError(f"{path}: {'; '.join(safe_errors(e))}") from None
         if item.name in into:
             raise CatalogError(f"{path}: duplicate name {item.name!r}")
         into[item.name] = item

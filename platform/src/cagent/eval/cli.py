@@ -16,9 +16,11 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 from cagent.eval import evaluate
@@ -70,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "report":
             return _print_summary(write_report(args.dir))
         if args.command == "pack":
-            return _pack(args.dir)
+            return _pack(args.dir, repo)
         return asyncio.run(_run(repo, args))
     except (evaluate.PreflightError, ScenarioError, HostError) as e:
         print(f"cagent-eval: {e}", file=sys.stderr)
@@ -149,10 +151,32 @@ async def _prepare(repo: Path, set_names: list[str]) -> int:
     return 0
 
 
-def _pack(directory: Path) -> int:
+REPORT_FILES = ("manifest.json", "summary.json", "judgements.json", "report.md")
+
+
+def _pack(directory: Path, repo: Path) -> int:
+    """Pack a copy of the evaluation with the repository root replaced by <repo>. The
+    evaluation itself is never changed. The report regenerated from the copy must equal the
+    original byte for byte, or nothing is exported: the replacement must not touch a result."""
     out = directory.with_name(directory.name + "-evidence.tar.gz")
-    with tarfile.open(out, "w:gz") as tar:
-        tar.add(directory, arcname=directory.name)
+    with tempfile.TemporaryDirectory() as tmp:
+        copy = Path(tmp) / directory.name
+        shutil.copytree(directory, copy)
+        root = str(repo).encode()
+        for path in copy.rglob("*"):
+            if path.is_file() and root in (data := path.read_bytes()):
+                path.write_bytes(data.replace(root, b"<repo>"))
+        write_report(copy)
+        if changed := [
+            f for f in REPORT_FILES if (copy / f).read_bytes() != (directory / f).read_bytes()
+        ]:
+            print(
+                f"cagent-eval: pack stopped, nothing exported: {', '.join(changed)} would change",
+                file=sys.stderr,
+            )
+            return 2
+        with tarfile.open(out, "w:gz") as tar:
+            tar.add(copy, arcname=directory.name)
     digest = hashlib.sha256(out.read_bytes()).hexdigest()
     print(f"{out} sha256 {digest} {out.stat().st_size} bytes")
     return 0

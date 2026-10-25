@@ -426,7 +426,8 @@ env:
   MYSQL_PASSWORD: "{{password}}"
   MYSQL_ROOT_PASSWORD: root
 healthcheck:
-  cmd: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u{{user}} -p{{password}} --silent"]
+  # commands read secrets from the container's environment, never from a placeholder (F1)
+  cmd: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u{{user}} -p\"$MYSQL_PASSWORD\" --silent"]
 presets:
   tiny: { mem_limit: 512m, cpus: 0.5 }
   standard: { mem_limit: 1g, cpus: 1.0 }
@@ -614,7 +615,7 @@ flowchart TD
 - **Reviewed-field allow-list**: the deny-list above names known escape vectors; the allow-list closes the rest. `runner/internal/compose/allowed_fields.json` lists the top-level and service keys the generator emits or that cannot weaken isolation. `validate` checks the keys in effect after YAML anchors, `extends`, and `include` are applied, and reports every other key as `field:<key>`, approvable one key at a time (`web:field:sysctls`, or `*:field:configs` for a top-level key). A key that already triggered a specific rule above is not reported twice. Keys starting with `x-` are compose extensions and always allowed. The platform's tests read the same file, so the generator cannot emit a key `validate` would reject.
 - **Local ceiling for RPC approvals**: over RPC, an approval takes effect only if its rule is in the Runner's local `serve -allow-rule` list (for example `-allow-rule privileged -allow-rule field:sysctls`). The list is empty by default, so a compromised platform or a leaked token cannot approve `privileged`, `docker-sock`, or any other exception on its own. The Runner rejects the call with JSON-RPC invalid params, naming the rule. An entry splits at its first colon into service and rule, so `*:field:configs` has the rule `field:configs`. The direct `-allow` flag of `validate` and `up` on the command line is unaffected: there the user is at the keyboard.
 - **Build commands**: the Runner runs a working-directory build only as that project's own descriptor (`.cagent/services/<service>.yaml` or `.cagent/service.yaml`) describes it: its build command, or its own Dockerfile. The platform can name a directory and a service to build but cannot supply a command, and the artifact, Dockerfile, and build context must resolve inside the directory. Drafted descriptors are saved by the user, never written by the Runner. Init scripts are staged only as the project's own descriptor names them (workdir) or from the downloaded jar's named entries (release, snapshot), into the workspace.
-- **Credentials and redaction**: credentials never leave the machine. The Runner redacts diagnostic snapshots (passwords, tokens, AK/SK, passwords inside JDBC URLs) before upload, so neither the platform nor any model sees raw logs. References such as `{{password}}` or `${DB_PASSWORD}` are kept: they name a secret without holding it. A reference's default is masked.
+- **Credentials and redaction**: credentials never leave the machine. The Runner redacts diagnostic snapshots (passwords, tokens, AK/SK, passwords inside JDBC URLs) before upload, so neither the platform nor any model sees raw logs. References such as `{{password}}` or `${DB_PASSWORD}` are kept: they name a secret without holding it. A reference's default is masked. Since F1 ([design](2026-10-24-f1-credential-safety-design.md)), model prompts also mask credential positions in commands, long known secrets, and the model's own root cause; catalog commands may not hold a secret (lint L1–L4); and a model patch that touches a secret-named key escalates as `credentials` instead of being applied.
 - **Audit**: the platform logs every tool call, patch, and approval, replayable per cluster.
 
 ## 9. Testing Strategy

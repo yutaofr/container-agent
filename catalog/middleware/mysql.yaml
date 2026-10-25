@@ -18,14 +18,16 @@ env:
 healthcheck:
   # TCP to 127.0.0.1 fails while the entrypoint's init server runs with skip-networking,
   # so the check turns healthy only once the real server accepts connections.
-  cmd: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u{{user}} -p{{password}} --silent"]
+  # The password comes from the container's environment: a command never holds a secret.
+  cmd: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u{{user}} -p\"$MYSQL_PASSWORD\" --silent"]
 presets:
   tiny: { mem_limit: 512m, cpus: 0.5 }
   standard: { mem_limit: 1g, cpus: 1.0 }
 # Init scripts run as root in the app database; cagent.init records each script by content.
 init:
+  env: [MYSQL_ROOT_PASSWORD]
   scripts:
     suffix: .sql
-    run: mysql -h{{host}} -uroot -proot {{db}} < "$file"
-    marked: mysql -h{{host}} -uroot -proot -N -e "SELECT 1 FROM cagent.init WHERE sha='$sha'" 2>/dev/null | grep -q 1
-    mark: mysql -h{{host}} -uroot -proot -e "CREATE DATABASE IF NOT EXISTS cagent; CREATE TABLE IF NOT EXISTS cagent.init (sha CHAR(64) PRIMARY KEY); INSERT INTO cagent.init VALUES ('$sha')"
+    run: mysql -h{{host}} -uroot -p"$MYSQL_ROOT_PASSWORD" {{db}} < "$file"
+    marked: mysql -h{{host}} -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "SELECT 1 FROM cagent.init WHERE sha='$sha'" 2>/dev/null | grep -q 1
+    mark: mysql -h{{host}} -uroot -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE IF NOT EXISTS cagent; CREATE TABLE IF NOT EXISTS cagent.init (sha CHAR(64) PRIMARY KEY); INSERT INTO cagent.init VALUES ('$sha')"

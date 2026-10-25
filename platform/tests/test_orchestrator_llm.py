@@ -174,3 +174,60 @@ async def test_a_model_repeating_a_tried_state_moves_up_instead_of_escalating(e2
     )
     assert status.outcome == "healthy"
     assert fake.models == ["fake/small", "fake/large", "fake/large"]
+
+
+async def test_a_credential_patch_escalates_at_once_and_changes_nothing(e2e_catalog):
+    sim = SimCluster(
+        requires_env={"mysql": {"MYSQL_PASSWORD": "other"}},
+        errors={"mysql": "Access denied for user 'app'"},
+    )
+    fake = FakeCompleter(
+        {
+            "fake/small": [
+                answer(
+                    "/services/mysql/environment/MYSQL_PASSWORD",
+                    "guess-1234",
+                    cause="mysql -uapp -papp fails",
+                ),
+                {"root_cause": "credentials are not mine to fix", "patch": []},
+            ],
+        }
+    )
+    o = run(sim, e2e_catalog, fake)
+    status = await start_and_approve(o, spec_with(services=[], middleware=[{"template": "mysql"}]))
+    assert status.waiting["kind"] == "escalation"
+    assert status.waiting["reason"] == "credentials"
+    assert status.waiting["fields"] == ["mysql: MYSQL_PASSWORD"]
+    assert status.waiting["root_cause"] == "mysql -uapp -p****** fails"
+    assert status.compose["services"]["mysql"]["environment"]["MYSQL_PASSWORD"] == "app"
+    assert fake.models == ["fake/small"]  # no automatic retry
+    # only an explicit Retry asks again
+    status = await o.resume("t1", {"action": "retry"})
+    assert fake.models == ["fake/small", "fake/small"]  # Retry resets the budgets
+    assert status.waiting["reason"] == "no_fix"
+
+
+async def test_masked_root_causes_reach_every_output(e2e_catalog):
+    cause = "mysql -uroot -proot fails, try --password=hunter2"
+    masked = "mysql -uroot -p****** fails, try --password=******"
+    sim = SimCluster(
+        requires_env={"flagcheck": {"FEATURE_FLAG": "on"}},
+        errors={"flagcheck": "FATAL: FEATURE_FLAG must be set to on"},
+    )
+    fake = FakeCompleter(
+        {
+            "fake/small": [answer("/services/flagcheck/image", "x:1", cause=cause)],
+            "fake/large": [
+                answer("/services/flagcheck/environment/FEATURE_FLAG", "on", op="add", cause=cause)
+            ],
+        }
+    )
+    o = run(sim, e2e_catalog, fake)
+    status = await start_and_approve(
+        o, spec_with(services=[], middleware=[{"template": "flagcheck"}])
+    )
+    assert status.waiting["kind"] == "patch_approval" and status.waiting["root_cause"] == masked
+    rejected = (await o.graph.aget_state(o._config("t1"))).values["rejected"]
+    assert [r["reason"] for r in rejected] == [masked]
+    status = await o.resume("t1", {"approve": True})
+    assert status.outcome == "healthy" and status.fixes[-1]["reason"] == masked

@@ -49,6 +49,6 @@ def test_other_fixes_still_pass():
 
 
 def test_judge_rejects_a_model_patch_on_an_init_service():
-    patch = [{"op": "replace", "path": "/services/mysql-init/mem_limit", "value": "1g"}]
-    verdict, _ = judge(patch, {"mysql-init": set()}, PROTECTED)
+    patch = [{"op": "add", "path": "/services/mysql-init/mem_limit", "value": "1g"}]
+    verdict, _ = judge(patch, {"mysql-init": set()}, PROTECTED, COMPOSE)
     assert verdict == "reject"

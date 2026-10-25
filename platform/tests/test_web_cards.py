@@ -245,3 +245,19 @@ async def test_the_reconcile_panel_and_a_recovery_card(web):
         assert r.status_code == 202
         await web.settle()
         assert (await web.service.snapshot("alice", run_id))["state"] == "healthy"
+
+
+async def test_a_credentials_escalation_names_the_rule_and_the_fields(web):
+    async with client(web) as c:
+        await html_login(c)
+        run_id = await new_run(web, c)
+        payload = {
+            "reason": "credentials",
+            "fields": ["orders: SPRING_DATASOURCE_PASSWORD"],
+            "root_cause": "password mismatch between mysql and orders",
+        }
+        await put_pending(web, run_id, "escalation", payload)
+        page = (await c.get(f"/runs/{run_id}")).text
+        assert "touches credential fields; a person must handle it" in page
+        assert "<code>orders: SPRING_DATASOURCE_PASSWORD</code>" in page
+        assert "as the model states it (not verified): password mismatch" in page
