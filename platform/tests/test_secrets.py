@@ -4,7 +4,9 @@ from cagent.secrets import (
     MASK,
     SECRET_KEY,
     is_reference,
+    known_secrets,
     mask_argv,
+    mask_compose,
     mask_shell,
     mask_text,
     trigger,
@@ -128,3 +130,65 @@ def test_text_masks_urls_assignments_and_long_known_values():
 
 def test_text_keeps_references_and_short_known_values():
     assert mask_text('PASSWORD="$DB_PASSWORD" -uroot', {"root"}) == 'PASSWORD="$DB_PASSWORD" -uroot'
+
+
+def test_prose_masks_short_options_only_beside_a_mysql_client():
+    assert mask_text("run mysql -uroot -proot to check") == "run mysql -uroot -p****** to check"
+    assert mask_text("redis-cli -p 6380 and nc -p5") == "redis-cli -p 6380 and nc -p5"
+    assert mask_text('mysql -p"$MYSQL_PASSWORD"') == 'mysql -p"$MYSQL_PASSWORD"'
+
+
+def test_known_secrets_come_from_secret_named_keys_in_every_shape():
+    compose = {
+        "services": {
+            "db": {"environment": {"MYSQL_PASSWORD": "app", "MYSQL_USER": "app", "X_TOKEN": ""}},
+            "app": {"environment": ["API_KEY=k-123456789", "MODE=a", "DB_PASSWORD=$DB_PASSWORD"]},
+            "bare": {"image": "busybox"},
+        }
+    }
+    assert known_secrets(compose) == {"app", "k-123456789"}
+
+
+def test_mask_compose_keeps_context_and_leaves_the_input_alone():
+    compose = {
+        "services": {
+            "mysql": {
+                "image": "mysql:8.4",
+                "environment": {"MYSQL_PASSWORD": "app", "MYSQL_DATABASE": "app"},
+                "healthcheck": {
+                    "test": ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uapp -papp --silent"],
+                    "interval": "5s",
+                },
+            },
+            "mysql-init": {
+                "entrypoint": ["sh", "-c", "mysql -hmysql -uroot -proot app < /x.sql"],
+            },
+            "orders": {
+                "environment": [
+                    "SPRING_DATASOURCE_URL=jdbc:mysql://app:pw@mysql:3306/app",
+                    "SPRING_DATASOURCE_PASSWORD=app",
+                ],
+                "command": ["java", "-Dspring.datasource.password=long-secret-1", "-jar", "a"],
+                "labels": {"note": "long-secret-1 is here"},
+            },
+        }
+    }
+    view = mask_compose(compose, {"app", "long-secret-1"})
+    mysql, init, orders = (
+        view["services"]["mysql"],
+        view["services"]["mysql-init"],
+        view["services"]["orders"],
+    )
+    assert mysql["environment"] == {"MYSQL_PASSWORD": MASK, "MYSQL_DATABASE": "app"}
+    assert mysql["healthcheck"] == {
+        "test": ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uapp -p****** --silent"],
+        "interval": "5s",
+    }
+    assert init["entrypoint"][2] == "mysql -hmysql -uroot -p****** app < /x.sql"
+    assert orders["environment"] == [
+        "SPRING_DATASOURCE_URL=jdbc:mysql://app:******@mysql:3306/app",
+        f"SPRING_DATASOURCE_PASSWORD={MASK}",
+    ]
+    assert orders["command"][1] == "-Dspring.datasource.password=******"
+    assert orders["labels"] == {"note": "****** is here"}
+    assert compose["services"]["mysql"]["environment"]["MYSQL_PASSWORD"] == "app"

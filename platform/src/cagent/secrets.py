@@ -21,10 +21,12 @@ masking every occurrence would destroy diagnostics, so they are masked only in c
 positions.
 """
 
+import copy
 import posixpath
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 SECRET_KEY = re.compile(r"(?i)password|passwd|pwd|secret|token|api_?key|access_?key")
 MASK = "******"
@@ -37,7 +39,7 @@ _SHELLS = frozenset({"sh", "bash", "ash", "dash", "zsh"})
 # Raw-text patterns: no structure, used for triggers and for text that is not a command.
 _VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"'`;|&()<>]+)"
 _RAW_CLIENT = re.compile(r"(?:^|[\s/\"'`(;|&])(?:mysql\w*|mariadb[\w-]*)(?=$|[\s\"'`);|&])")
-_RAW_P = re.compile(r"(?:^|[\s\"'`(;|&])-p" + _VALUE)
+_RAW_P = re.compile(r"(?<![^\s\"'`(;|&])(-p)" + _VALUE)
 _PASSWORD_OPT = re.compile(r"(--password(?:=|\s+))" + _VALUE)
 _URL_USERINFO = re.compile(r"(://[^:/@\s\"']+:)([^@\s\"']+)(@)")
 _ASSIGNMENT = re.compile(
@@ -58,7 +60,7 @@ def is_reference(value: str) -> bool:
 def trigger(text: str) -> bool:
     """True when the raw text holds a credential-position value that is not a reference."""
     if _RAW_CLIENT.search(text) and any(
-        not is_reference(m.group(1)) for m in _RAW_P.finditer(text)
+        not is_reference(m.group(2)) for m in _RAW_P.finditer(text)
     ):
         return True
     for pattern, group in ((_PASSWORD_OPT, 2), (_URL_USERINFO, 2), (_ASSIGNMENT, 2)):
@@ -67,9 +69,11 @@ def trigger(text: str) -> bool:
     return False
 
 
-def mask_text(text: str, known: Iterable[str] = ()) -> str:
+def mask_text(text: str, known: Iterable[str] = (), *, short_p: bool = True) -> str:
     """Mask URL passwords, secret-named assignments, --password values, and long known
-    values anywhere in a string (a log line, an environment value, a root cause)."""
+    values anywhere in a string (a log line, an environment value, a root cause). In text
+    that names a MySQL-family client, -p<value> is masked too; mask_shell and mask_argv
+    turn that off (short_p=False) because they know each command's own words."""
 
     def keep_refs(m: re.Match[str]) -> str:
         value = m.group(2)
@@ -82,6 +86,8 @@ def mask_text(text: str, known: Iterable[str] = ()) -> str:
     text = _URL_USERINFO.sub(keep_refs, text)
     text = _ASSIGNMENT.sub(keep_refs, text)
     text = _PASSWORD_OPT.sub(keep_refs, text)
+    if short_p and _RAW_CLIENT.search(text):
+        text = _RAW_P.sub(keep_refs, text)
     for value in sorted(
         {k for k in known if len(k) >= LONG_SECRET and not is_reference(k)}, key=len, reverse=True
     ):
@@ -201,11 +207,11 @@ def mask_shell(text: str, known: Iterable[str] = ()) -> str:
     the tokenizer does not follow and holds a trigger."""
     commands, unsupported = _parse(text)
     if unsupported:
-        return MASK if trigger(text) else mask_text(text, known)
+        return MASK if trigger(text) else mask_text(text, known, short_p=False)
     edits = sorted((r for words in commands for r in _replacements(text, words)), reverse=True)
     for start, end, replacement in edits:
         text = text[:start] + replacement + text[end:]
-    return mask_text(text, known)
+    return mask_text(text, known, short_p=False)
 
 
 def mask_argv(argv: list[str], known: Iterable[str] = ()) -> list[str]:
@@ -226,9 +232,89 @@ def mask_argv(argv: list[str], known: Iterable[str] = ()) -> list[str]:
             out[k] = "--password=" + MASK
         elif arg == "--password" and k + 1 < len(argv) and not is_reference(argv[k + 1]):
             out[k + 1] = MASK
-            out[k] = mask_text(arg, known)
+            out[k] = mask_text(arg, known, short_p=False)
             k += 2
             continue
-        out[k] = mask_text(out[k], known)
+        out[k] = mask_text(out[k], known, short_p=False)
         k += 1
     return out
+
+
+def known_secrets(compose: dict[str, Any]) -> set[str]:
+    """Values of secret-named environment keys in every service, mapping or list form;
+    empty values and pure references are no secrets."""
+    values: set[str] = set()
+    for svc in (compose.get("services") or {}).values():
+        for key, value in _env_pairs((svc or {}).get("environment")):
+            if SECRET_KEY.search(key) and value and not is_reference(value):
+                values.add(value)
+    return values
+
+
+def _env_pairs(env: Any) -> list[tuple[str, str]]:
+    if isinstance(env, dict):
+        return [(str(k), "" if v is None else str(v)) for k, v in env.items()]
+    if isinstance(env, list):
+        return [tuple(str(e).partition("=")[::2]) for e in env]  # type: ignore[misc]
+    return []
+
+
+def mask_compose(compose: dict[str, Any], known: Iterable[str]) -> dict[str, Any]:
+    """A masked copy of a compose document: secret-named environment values by key,
+    command fields with their argument context, every other string as text."""
+    known = set(known)
+    out = copy.deepcopy(compose)
+    for svc in (out.get("services") or {}).values():
+        if not isinstance(svc, dict):
+            continue
+        for field, value in svc.items():
+            if field == "environment":
+                svc[field] = _mask_env(value, known)
+            elif field in ("command", "entrypoint"):
+                svc[field] = _mask_command(value, known)
+            elif field == "healthcheck" and isinstance(value, dict):
+                svc[field] = {
+                    k: _mask_test(v, known) if k == "test" else _walk(v, known)
+                    for k, v in value.items()
+                }
+            else:
+                svc[field] = _walk(value, known)
+    return out
+
+
+def _mask_env(env: Any, known: set[str]) -> Any:
+    if isinstance(env, dict):
+        return {k: MASK if SECRET_KEY.search(str(k)) else _walk(v, known) for k, v in env.items()}
+    if isinstance(env, list):
+        out = []
+        for entry in env:
+            key, sep, value = str(entry).partition("=")
+            out.append(
+                f"{key}={MASK}" if sep and SECRET_KEY.search(key) else mask_text(str(entry), known)
+            )
+        return out
+    return _walk(env, known)
+
+
+def _mask_command(value: Any, known: set[str]) -> Any:
+    if isinstance(value, list):
+        return mask_argv([str(v) for v in value], known)
+    if isinstance(value, str):
+        return mask_shell(value, known)
+    return value
+
+
+def _mask_test(value: Any, known: set[str]) -> Any:
+    if isinstance(value, list) and value[:1] == ["CMD-SHELL"]:
+        return ["CMD-SHELL", *[mask_shell(str(v), known) for v in value[1:]]]
+    return _mask_command(value, known)
+
+
+def _walk(value: Any, known: set[str]) -> Any:
+    if isinstance(value, str):
+        return mask_text(value, known)
+    if isinstance(value, dict):
+        return {k: _walk(v, known) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_walk(v, known) for v in value]
+    return value

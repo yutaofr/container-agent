@@ -26,6 +26,7 @@ from cagent.catalog import Catalog
 from cagent.llm import Router
 from cagent.patches import init_services, within_environment
 from cagent.rules import Problem
+from cagent.secrets import SECRET_KEY, known_secrets, mask_compose, mask_text
 from cagent.spec import ClusterSpec
 
 EnvValue = str | int | float | bool | None
@@ -66,7 +67,6 @@ SYSTEM = (
     "schema."
 )
 
-_SECRET_KEY = re.compile(r"(?i)password|passwd|pwd|secret|token|api_?key|access_?key")
 # JVM options that load code or run a shell command: agents, and the OnError/OnOutOfMemoryError
 # hooks, which execute their argument when the JVM crashes or runs out of memory.
 _AGENT_VALUE = re.compile(r"(?i)-(javaagent|agentpath|agentlib)[:=]|-XX:\+?On(OutOfMemory)?Error\b")
@@ -116,7 +116,7 @@ def mask_secrets(compose: dict[str, Any]) -> dict[str, Any]:
         env = svc.get("environment")
         if isinstance(env, dict):
             for k in env:
-                if _SECRET_KEY.search(k):
+                if SECRET_KEY.search(k):
                     env[k] = "******"
     return masked
 
@@ -133,9 +133,16 @@ def _unescape_compose(value: Any) -> Any:
 
 
 def prompt_view(compose: dict[str, Any]) -> dict[str, Any]:
-    """The compose document as a model should read it: secrets masked, and $$ shown as $.
-    Seeing the escape, a model took `$$CACHE_PORT` for a bug in the command and gave up."""
-    return _unescape_compose(mask_secrets(compose))
+    """The compose document as a model should read it: $$ shown as $, then secrets masked
+    (environment values by key, credential positions in commands, long known values).
+    Seeing the escape, a model took `$$CACHE_PORT` for a bug in the command and gave up;
+    unescaping first lets the masking recognise $NAME references as the container does."""
+    view = _unescape_compose(compose)
+    return mask_compose(view, known_secrets(view))
+
+
+def _known(compose: dict[str, Any]) -> set[str]:
+    return known_secrets(_unescape_compose(compose))
 
 
 def _env_items(op: dict[str, Any]) -> list[tuple[str, str, str | None]]:
@@ -235,7 +242,8 @@ def prompt(
     services = prompt_view(compose)["services"]
     scope = services if cross else {problem.service: services.get(problem.service, {})}
     keys = {s: sorted(declared.get(s, set())) for s in scope}
-    log = [f"  {line}" for line in lines[-25:]] or ["  (none)"]
+    known = _known(compose)
+    log = [f"  {mask_text(line, known)}" for line in lines[-25:]] or ["  (none)"]
     return "\n".join(
         [
             f"Service `{problem.service}` failed: signature {problem.signature}, "
@@ -265,8 +273,11 @@ async def propose(
     diag, tier = await router.ask(
         SYSTEM, prompt(problem, state, lines, compose, declared, cross), Diagnosis, start=start
     )
+    # Masked once, here: every later use (escalations, approvals, fix reasons, rejected
+    # records, events) reads this text. The patch stays as proposed: it is what is judged.
+    root_cause = mask_text(diag.root_cause, _known(compose))
     patch = [op.model_dump(exclude={"value"} if op.op == "remove" else set()) for op in diag.patch]
     if not patch:
-        return Proposal(tier, problem.signature, diag.root_cause, [], "give_up")
+        return Proposal(tier, problem.signature, root_cause, [], "give_up")
     verdict, reasons = judge(patch, declared, init_services(compose))
-    return Proposal(tier, problem.signature, diag.root_cause, patch, verdict, reasons)
+    return Proposal(tier, problem.signature, root_cause, patch, verdict, reasons)

@@ -6,6 +6,7 @@ from cagent.diagnose import (
     is_cross_service,
     judge,
     mask_secrets,
+    prompt,
     prompt_view,
     propose,
 )
@@ -260,3 +261,51 @@ def test_prompt_view_shows_commands_as_the_container_sees_them():
     assert view["command"][2] == 'nc -z "$CACHE_HOST" "$CACHE_PORT"'
     assert view["environment"] == {"DB_PASSWORD": "******", "MODE": "a$b"}
     assert compose["services"]["app"]["command"][2].count("$$") == 2  # input untouched
+
+
+MYSQL_COMPOSE = {
+    "services": {
+        "mysql": {
+            "image": "mysql:8.4",
+            "environment": {"MYSQL_DATABASE": "app", "MYSQL_PASSWORD": "app"},
+            "healthcheck": {
+                "test": ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uapp -papp --silent"]
+            },
+        },
+        "mysql-init": {
+            "entrypoint": ["sh", "-c", 'set -eu\nmysql -hmysql -uroot -proot app < "$$file"'],
+        },
+        "orders": {"environment": {"SPRING_DATASOURCE_PASSWORD": "long-secret-1"}},
+    }
+}
+
+
+def test_prompts_hold_no_credential_and_keep_diagnostics():
+    text = prompt(
+        Problem("auth:denied", "orders"),
+        {"state": "exited"},
+        ["Access denied: long-secret-1 rejected", "ran mysql -uroot -proot"],
+        MYSQL_COMPOSE,
+        {"orders": {"SPRING_DATASOURCE_PASSWORD"}},
+        cross=True,
+    )
+    for secret in ("-papp", "-proot", "long-secret-1"):
+        assert secret not in text
+    for kept in ("-uapp", "-uroot", "MYSQL_DATABASE: app", '< "$file"'):
+        assert kept in text
+
+
+async def test_the_root_cause_is_masked_before_anything_uses_it():
+    fake = FakeCompleter(
+        {
+            "fake/large": [
+                {"root_cause": "mysql -uroot -proot fails; long-secret-1 is stale", "patch": []}
+            ]
+        }
+    )
+    snapshot = {"services": [{"service": "orders", "error_lines": ["Access denied"]}]}
+    proposal = await propose(
+        Router(CONFIG, fake), Problem("auth:denied", "orders"), snapshot, MYSQL_COMPOSE, {}, 0
+    )
+    assert proposal.root_cause == "mysql -uroot -p****** fails; ****** is stale"
+    assert "long-secret-1" not in fake.calls[0][1]
